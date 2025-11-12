@@ -1,0 +1,15 @@
+src-tauri/target/
+node_modules/
+*.log
+frontend/build/
+backend/venv*/
+*.dylib
+*.pack
+*.rlib
+*.rmeta
+*.pyc
+__pycache__/
+.DS_Store
+*.db
+*.sqlite
+*.sqlite3

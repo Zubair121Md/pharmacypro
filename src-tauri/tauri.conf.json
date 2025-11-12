@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "Pharmacy Revenue Management",
+  "version": "1.0.0",
+  "identifier": "com.pharmacy.revenue",
+  "build": {
+    "devUrl": "http://127.0.0.1:3000",
+    "frontendDist": "../frontend/build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pharmacy Revenue Management System",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png", 
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "longDescription": "A comprehensive pharmacy revenue management system for tracking sales, managing doctor allocations, and analyzing business performance.",
+    "shortDescription": "Pharmacy Revenue Management System",
+    "copyright": "Copyright (c) 2024 Pharmacy Revenue Team",
+    "category": "Business",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {}
+}
