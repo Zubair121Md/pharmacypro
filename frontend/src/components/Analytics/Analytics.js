@@ -219,7 +219,7 @@ function Analytics() {
   const [dqLoading, setDqLoading] = useState(false);
   const [dqError, setDqError] = useState(null);
 
-  useEffect(() => {
+  const refreshAllAnalytics = useCallback(() => {
     dispatch(fetchRevenueByPharmacy());
     dispatch(fetchRevenueByDoctor());
     dispatch(fetchRevenueByRep());
@@ -227,6 +227,25 @@ function Analytics() {
     dispatch(fetchRevenueByArea());
     dispatch(fetchRevenueByProduct());
     dispatch(fetchMonthlyTrends());
+  }, [dispatch]);
+
+  useEffect(() => {
+    refreshAllAnalytics();
+    
+    // Listen for analytics data updates (e.g., after split rule changes)
+    const handleAnalyticsUpdate = () => {
+      console.log('Analytics data updated, refreshing analytics...');
+      refreshAllAnalytics();
+    };
+    
+    window.addEventListener('analyticsDataUpdated', handleAnalyticsUpdate);
+    
+    return () => {
+      window.removeEventListener('analyticsDataUpdated', handleAnalyticsUpdate);
+    };
+  }, [refreshAllAnalytics]);
+
+  useEffect(() => {
     // Load Data Quality
     (async () => {
       try {
@@ -258,13 +277,7 @@ function Analytics() {
   };
 
   const handleRefresh = () => {
-    dispatch(fetchRevenueByPharmacy());
-    dispatch(fetchRevenueByDoctor());
-    dispatch(fetchRevenueByRep());
-    dispatch(fetchRevenueByHQ());
-    dispatch(fetchRevenueByArea());
-    dispatch(fetchRevenueByProduct());
-    dispatch(fetchMonthlyTrends());
+    refreshAllAnalytics();
   };
 
   if (loading) {

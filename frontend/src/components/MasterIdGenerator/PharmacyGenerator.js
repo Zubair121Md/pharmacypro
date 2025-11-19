@@ -30,24 +30,30 @@ const PharmacyGenerator = () => {
   const [generatedIds, setGeneratedIds] = useState([]);
   const [error, setError] = useState('');
 
+  const normalizeText = (text, length, fromEnd = false) => {
+    if (!text || !text.trim()) {
+      return '_'.repeat(length);
+    }
+    // Remove ALL special chars (including . and ,)
+    const cleaned = text.replace(/[^\w\s]/g, '').trim().toLowerCase();
+    if (!cleaned) {
+      return '_'.repeat(length);
+    }
+    // Remove spaces and slice
+    const noSpaces = cleaned.replace(/\s/g, '');
+    const sliceTxt = fromEnd ? noSpaces.slice(-length) : noSpaces.slice(0, length);
+    return sliceTxt.toUpperCase().padEnd(length, '_');
+  };
+
   const generateId = (text) => {
     const raw = (text || '').trim();
-    const commaIdx = raw.indexOf(',');
-    let facility = raw;
-    let locationRemainder = '';
-    if (commaIdx !== -1) {
-      facility = raw.slice(0, commaIdx);
-      locationRemainder = raw.slice(commaIdx + 1);
-    } else {
-      locationRemainder = 'Not Specified';
+    if (!raw) {
+      return 'INVALID';
     }
-    const facilityCode = (facility || '').replace(/[^A-Za-z0-9\.]/g, '').toUpperCase().slice(0, 10);
-    const locClean = (locationRemainder || '').replace(/[^A-Za-z0-9\.]/g, '').toUpperCase();
-    let locationCode = locClean ? locClean.slice(-10) : '';
-    if (locationCode && locationCode.length < 10) {
-      locationCode = locationCode.padEnd(10, '_');
-    }
-    return locationCode ? `${facilityCode}-${locationCode}` : facilityCode;
+    // Use full name for both facility and location (no splitting)
+    const facilityCode = normalizeText(raw, 10, false);
+    const locationCode = normalizeText(raw, 10, true);
+    return `${facilityCode}-${locationCode}`;
   };
 
   const handleGenerate = () => {

@@ -108,7 +108,8 @@ export const adminAPI = {
   getStats: () => api.get('/api/v1/admin/stats'),
   getAuditLogs: () => api.get('/api/v1/admin/audit-logs'),
   clearRecentUploads: () => api.post('/api/v1/admin/clear-recent-uploads'),
-  resetMemory: () => api.post('/api/v1/admin/reset-memory'),
+  resetSystem: () => api.post('/api/v1/admin/reset-system'),
+  resetMasterData: () => api.post('/api/v1/admin/reset-master-data'),
 };
 
 
@@ -136,9 +137,46 @@ export const unmatchedAPI = {
   getUnmatchedRecords: () => api.get('/api/v1/unmatched'),
   mapRecord: (id, masterPharmacyId) => api.post(`/api/v1/unmatched/${id}/map`, { master_pharmacy_id: masterPharmacyId }),
   ignoreRecord: (id) => api.post(`/api/v1/unmatched/${id}/ignore`),
-  getMasterPharmacies: () => api.get('/api/v1/unmatched/master-pharmacies'),
+  getMasterPharmacies: (query = '') => api.get('/api/v1/unmatched/master-pharmacies', { params: { query } }),
   exportCSV: () => api.get('/api/v1/unmatched/export', { params: { format: 'csv' }, responseType: 'blob' }),
   exportExcel: () => api.get('/api/v1/unmatched/export', { params: { format: 'xlsx' }, responseType: 'blob' }),
+};
+
+// Newly Mapped Records API
+export const newlyMappedAPI = {
+  getNewlyMappedRecords: () => api.get('/api/v1/newly-mapped'),
+  updateMapping: (recordId, masterPharmacyId) => api.put(`/api/v1/newly-mapped/${recordId}`, { master_pharmacy_id: masterPharmacyId }),
+  deleteMapping: (recordId) => api.delete(`/api/v1/newly-mapped/${recordId}`),
+};
+
+// Master Data API
+export const masterDataAPI = {
+  getMasterData: (skip = 0, limit = 100) => api.get('/api/v1/master-data', { params: { skip, limit } }),
+  createMasterData: (data) => api.post('/api/v1/master-data', data),
+  updateMasterData: (recordId, updateData) => api.put(`/api/v1/master-data/${recordId}`, updateData),
+  deleteMasterData: (recordId) => api.delete(`/api/v1/master-data/${recordId}`),
+  exportExcel: () => api.get('/api/v1/master-data/export', { params: { format: 'xlsx' }, responseType: 'blob' }),
+  exportCSV: () => api.get('/api/v1/master-data/export', { params: { format: 'csv' }, responseType: 'blob' }),
+  getUniqueValues: () => api.get('/api/v1/master-data/unique-values'),
+  getDuplicates: () => api.get('/api/v1/master-data/duplicates'),
+};
+
+// Split Rule API
+export const splitRuleAPI = {
+  getSplitRules: () => api.get('/api/v1/split-rules'),
+  createSplitRule: (ruleData) => api.post('/api/v1/split-rules', ruleData),
+  deleteSplitRule: (ruleId) => api.delete(`/api/v1/split-rules/${ruleId}`),
+  exportExcel: () => api.get('/api/v1/split-rules/export', { params: { format: 'xlsx' }, responseType: 'blob' }),
+  exportCSV: () => api.get('/api/v1/split-rules/export', { params: { format: 'csv' }, responseType: 'blob' }),
+  importExcel: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/api/v1/split-rules/import', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
 };
 
 // Export API
@@ -153,6 +191,24 @@ export const exportAPI = {
 export const generatorAPI = {
   generateId: (name, type) => api.post('/api/v1/generator/generate', { name, type }),
   generateBatch: (requests) => api.post('/api/v1/generator/batch', requests),
+  uploadProductReference: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/api/v1/generator/upload-product-reference', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
+};
+
+// Product Data API
+export const productDataAPI = {
+  getProducts: (skip = 0, limit = 100) => api.get('/api/v1/products', { params: { skip, limit } }),
+  getAllProducts: () => api.get('/api/v1/products/all'),
+  createProduct: (data) => api.post('/api/v1/products', data),
+  updateProduct: (productId, updateData) => api.put(`/api/v1/products/${productId}`, updateData),
+  deleteProduct: (productId) => api.delete(`/api/v1/products/${productId}`),
 };
 
 export default api;

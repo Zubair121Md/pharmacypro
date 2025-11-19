@@ -1,19 +1,23 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Body
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
+from sqlalchemy.orm import Session
 import pandas as pd
 import json
 from datetime import datetime, timedelta
 import uuid
 import os
 import tempfile
+import logging
 from app.file_processor import FileProcessor
 from fastapi import BackgroundTasks
 from app.database import init_db as _init_db
 from app.database import ensure_unmatched_schema as _ensure_unmatched_schema
-from typing import Dict
+
+# Setup logger
+logger = logging.getLogger(__name__)
 # from app.routes import advanced  # Temporarily disabled
 
 app = FastAPI(
@@ -92,6 +96,7 @@ class IdGenerationResponse(BaseModel):
     generated_id: str
     type: str
     timestamp: str
+    metadata: Optional[Dict] = None  # For product: price and matched_original
 
 class DashboardData(BaseModel):
     total_revenue: float
@@ -214,38 +219,55 @@ def normalize_text(text: str) -> str:
     # Keep dots as valid characters
     return re.sub(r'[^A-Z0-9\.]', '', text.upper())[:8].ljust(8, '-')
 
-def generate_id(name: str, id_type: str) -> str:
+def generate_id(name: str, id_type: str, db: Session = None) -> str:
     """Generate standardized ID based on type"""
     import re
 
     if id_type == 'pharmacy':
-        # Match the provided script behavior exactly:
-        # - Split on first comma into Facility, Location (remainder)
-        # - Facility code: first 10 alnum chars of Facility (spaces removed)
-        # - Location code: last 10 alnum chars of full Location remainder (spaces removed)
+        # Use full name for both facility and location (no splitting)
+        # - Remove ALL special chars (including . and ,)
+        # - Facility code: first 10 chars (spaces removed)
+        # - Location code: last 10 chars (spaces removed)
         raw = (name or "").strip()
-        facility = raw
-        location_remainder = ""
-
-        comma_idx = raw.find(",")
-        if comma_idx != -1:
-            facility = raw[:comma_idx]
-            location_remainder = raw[comma_idx+1:]
+        if not raw:
+            return "INVALID"
+        
+        # Remove ALL special chars (including . and ,)
+        cleaned = re.sub(r'[^\w\s]', '', raw).strip().lower()
+        if not cleaned:
+            return "INVALID"
+        
+        # Remove spaces
+        no_spaces = cleaned.replace(" ", "")
+        
+        # Get first 10 and last 10 characters
+        facility_code = no_spaces[:10].upper().ljust(10, "_")
+        location_code = no_spaces[-10:].upper().ljust(10, "_")
+        
+        return f"{facility_code}-{location_code}"
+    
+    elif id_type == 'doctor':
+        # Use doctor ID generator
+        if db is None:
+            from app.database import get_db
+            db = next(get_db())
+            should_close = True
         else:
-            # No comma -> treat as missing location (per excel script uses 'Not Specified')
-            location_remainder = 'Not Specified'
-
-        def _clean_alnum(s: str) -> str:
-            # Allow dots to be retained
-            return re.sub(r"[^A-Za-z0-9\.]", "", s or "")
-
-        facility_code = _clean_alnum(facility).upper()[:10]
-        loc_clean = _clean_alnum(location_remainder).upper()
-        location_code = (loc_clean[-10:] if loc_clean else "")
-        if location_code and len(location_code) < 10:
-            location_code = location_code.ljust(10, "_")
-
-        return f"{facility_code}-{location_code}" if location_code else facility_code
+            should_close = False
+        
+        try:
+            from app.doctor_id_generator import generate_doctor_id
+            result = generate_doctor_id(name, db, 0)
+            return result
+        finally:
+            if should_close:
+                db.close()
+    
+    elif id_type == 'product':
+        # Product ID requires reference table - handled separately via API
+        # This is a fallback
+        normalized = normalize_text(name)
+        return f"PX-{normalized}"
 
     # Default for other types
     normalized = normalize_text(name)
@@ -280,28 +302,66 @@ async def health_check():
 # Authentication endpoints
 @app.post("/api/v1/auth/login")
 async def login(login_data: dict):
-    username = login_data.get("username")
-    password = login_data.get("password")
-    
-    if username == "admin" and password == "admin123":
-        user = User(id=1, username="admin", email="admin@pharmacy.com", full_name="Admin User", role="super_admin")
-        return {
-            "access_token": "demo_token_12345", 
-            "token_type": "bearer",
-            "user": user
-        }
-    elif username == "user" and password == "user123":
-        user = User(id=2, username="user", email="user@pharmacy.com", full_name="Regular User", role="user")
-        return {
-            "access_token": "demo_token_user_12345", 
-            "token_type": "bearer",
-            "user": user
-        }
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Incorrect username or password",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    try:
+        username = login_data.get("username", "").strip()
+        password = login_data.get("password", "").strip()
+        
+        logger.info(f"Login attempt: username={username}")
+        
+        if username == "admin" and password == "admin123":
+            user = User(id=1, username="admin", email="admin@pharmacy.com", full_name="Admin User", role="super_admin")
+            return {
+                "access_token": "demo_token_12345", 
+                "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": user.role
+                }
+            }
+        elif username == "manager" and password == "manager123":
+            user = User(id=2, username="manager", email="manager@pharmacy.com", full_name="Manager User", role="admin")
+            return {
+                "access_token": "demo_token_manager_12345", 
+                "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": user.role
+                }
+            }
+        elif username == "user" and password == "user123":
+            user = User(id=3, username="user", email="user@pharmacy.com", full_name="Regular User", role="user")
+            return {
+                "access_token": "demo_token_user_12345", 
+                "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": user.role
+                }
+            }
+        
+        logger.warning(f"Failed login attempt: username={username}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login failed: {str(e)}"
+        )
 
 @app.get("/api/v1/auth/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_user)):
@@ -869,19 +929,39 @@ async def get_rep_revenue(current_user: User = Depends(get_current_user)):
 
 @app.get("/api/v1/analytics/hq-revenue")
 async def get_hq_revenue(current_user: User = Depends(get_current_user)):
-    hq_revenue: Dict[str, float] = {}
-    for item in mock_data["revenue_data"]:
-        hq = item.get("hq") or "Unknown"
-        hq_revenue[hq] = hq_revenue.get(hq, 0.0) + float(item["revenue"])
-    return [{"hq": k, "revenue": v} for k, v in hq_revenue.items()]
+    try:
+        from app.tasks_enhanced import create_chart_ready_data
+        from app.database import get_db
+        
+        # Get database session
+        db = next(get_db())
+        
+        # Get chart data from database
+        chart_data = create_chart_ready_data(db, current_user)
+        
+        return chart_data["hq_revenue"]
+        
+    except Exception as e:
+        logger.error(f"Error getting HQ revenue: {str(e)}")
+        return []
 
 @app.get("/api/v1/analytics/area-revenue")
 async def get_area_revenue(current_user: User = Depends(get_current_user)):
-    area_revenue: Dict[str, float] = {}
-    for item in mock_data["revenue_data"]:
-        area = item.get("area") or "Unknown"
-        area_revenue[area] = area_revenue.get(area, 0.0) + float(item["revenue"])
-    return [{"area": k, "revenue": v} for k, v in area_revenue.items()]
+    try:
+        from app.tasks_enhanced import create_chart_ready_data
+        from app.database import get_db
+        
+        # Get database session
+        db = next(get_db())
+        
+        # Get chart data from database
+        chart_data = create_chart_ready_data(db, current_user)
+        
+        return chart_data["area_revenue"]
+        
+    except Exception as e:
+        logger.error(f"Error getting area revenue: {str(e)}")
+        return []
 
 @app.get("/api/v1/analytics/product-revenue")
 async def get_product_revenue(current_user: User = Depends(get_current_user)):
@@ -1363,10 +1443,10 @@ async def export_unmatched(format: str = "csv", current_user: User = Depends(get
         raise HTTPException(status_code=400, detail="Unsupported format. Use 'csv' or 'xlsx'")
 
 @app.post("/api/v1/unmatched/{record_id}/map")
-async def map_record(record_id: int, mapping_data: dict, current_user: User = Depends(get_current_user)):
-    """Map an unmatched record to a master pharmacy"""
+async def map_record(record_id: int, mapping_data: Dict = Body(...), current_user: User = Depends(get_current_user)):
+    """Map an unmatched record to a master pharmacy and create invoice for analytics"""
     try:
-        from app.database import get_db, Unmatched
+        from app.database import get_db, Unmatched, MasterMapping, Invoice
         
         master_pharmacy_id = mapping_data.get("master_pharmacy_id")
         if not master_pharmacy_id:
@@ -1380,16 +1460,432 @@ async def map_record(record_id: int, mapping_data: dict, current_user: User = De
         if not unmatched_record:
             raise HTTPException(status_code=404, detail="Unmatched record not found")
         
-        # Update the record
+        # Import normalize_product_name for matching
+        from app.tasks_enhanced import normalize_product_name
+        
+        # Normalize pharmacy_id and product for matching
+        normalized_pharmacy_id = str(master_pharmacy_id).replace('-', '_')
+        unmatched_product = unmatched_record.product or ''
+        normalized_unmatched_product = normalize_product_name(unmatched_product)
+        
+        # Find master record that matches BOTH pharmacy_id AND product
+        # This is critical for analytics to work properly
+        master_pharmacy = None
+        master_records = db.query(MasterMapping).filter(
+            MasterMapping.pharmacy_id == master_pharmacy_id
+        ).all()
+        
+        # Try to find exact match on pharmacy + product
+        for record in master_records:
+            normalized_master_product = normalize_product_name(record.product_names or '')
+            if normalized_master_product == normalized_unmatched_product:
+                master_pharmacy = record
+                break
+        
+        # If no exact product match, use the first master record for this pharmacy
+        # (This handles cases where product names don't match exactly)
+        if not master_pharmacy and master_records:
+            master_pharmacy = master_records[0]
+            logger.warning(f"Product mismatch for {unmatched_record.pharmacy_name}: unmatched product '{unmatched_product}' vs master product '{master_pharmacy.product_names}'. Using first master record.")
+        
+        if not master_pharmacy:
+            raise HTTPException(status_code=404, detail="Master pharmacy not found")
+        
+        # Update the record - mapped_to should be a string (pharmacy_id)
         unmatched_record.status = "mapped"
-        unmatched_record.mapped_to = master_pharmacy_id
+        unmatched_record.mapped_to = str(master_pharmacy_id)
+        
+        # Create or update Master Data record for this newly mapped pharmacy+product combination
+        # This ensures the mapped pharmacy appears in Master Data Management
+        invoice_product = master_pharmacy.product_names if master_pharmacy.product_names else unmatched_product
+        
+        # Create TWO master mappings for proper matching:
+        # 1. One with the master pharmacy_id (for display and standard matching)
+        # 2. One with the original generated_id (for future invoice uploads with same name variations)
+        
+        # First: Check/create mapping with the master pharmacy_id
+        existing_master = db.query(MasterMapping).filter(
+            MasterMapping.pharmacy_id == normalized_pharmacy_id,
+            MasterMapping.pharmacy_names == unmatched_record.pharmacy_name,
+            MasterMapping.product_names == invoice_product
+        ).first()
+        
+        if not existing_master:
+            # Create new master mapping record with the master pharmacy_id
+            new_master_mapping = MasterMapping(
+                pharmacy_id=normalized_pharmacy_id,
+                pharmacy_names=unmatched_record.pharmacy_name,
+                product_names=invoice_product,
+                product_id=master_pharmacy.product_id,
+                product_price=master_pharmacy.product_price,
+                doctor_names=master_pharmacy.doctor_names,
+                doctor_id=master_pharmacy.doctor_id,
+                rep_names=master_pharmacy.rep_names,
+                hq=master_pharmacy.hq,
+                area=master_pharmacy.area,
+                source="manual_mapping"
+            )
+            db.add(new_master_mapping)
+            logger.info(f"Created master mapping (MANUAL) for: {unmatched_record.pharmacy_name} + {invoice_product}")
+        
+        # Second: Create mapping with the original generated_id to handle future uploads
+        # This ensures re-uploaded invoices with same pharmacy name will auto-match
+        original_generated_id = unmatched_record.generated_id
+        if original_generated_id and original_generated_id != 'INVALID' and original_generated_id != normalized_pharmacy_id:
+            # Normalize the original generated_id
+            normalized_generated_id = original_generated_id.replace('-', '_')
+            
+            existing_variant = db.query(MasterMapping).filter(
+                MasterMapping.pharmacy_id == normalized_generated_id,
+                MasterMapping.pharmacy_names == unmatched_record.pharmacy_name,
+                MasterMapping.product_names == invoice_product
+            ).first()
+            
+            if not existing_variant:
+                # Create a mapping variant for the original generated_id
+                variant_mapping = MasterMapping(
+                    pharmacy_id=normalized_generated_id,  # Use the original generated_id
+                    pharmacy_names=unmatched_record.pharmacy_name,
+                    product_names=invoice_product,
+                    product_id=master_pharmacy.product_id,
+                    product_price=master_pharmacy.product_price,
+                    doctor_names=master_pharmacy.doctor_names,
+                    doctor_id=master_pharmacy.doctor_id,
+                    rep_names=master_pharmacy.rep_names,
+                    hq=master_pharmacy.hq,
+                    area=master_pharmacy.area,
+                    source="manual_mapping"
+                )
+                db.add(variant_mapping)
+                logger.info(f"Created variant mapping for future uploads: {normalized_generated_id} + {invoice_product}")
+        
+        # Create Invoice record for analytics
+        # Use the master product name to ensure proper matching in analytics
+        user_id = current_user.id if hasattr(current_user, 'id') else unmatched_record.user_id or 1
+        
+        # Use master product name for invoice to ensure analytics matching works
+        invoice_product = master_pharmacy.product_names if master_pharmacy.product_names else unmatched_product
+        
+        # Create invoice for each mapped record (allow multiple invoices for same pharmacy+product)
+        # Use the actual amount from unmatched record if available, otherwise calculate
+        quantity = int(unmatched_record.quantity or 0)
+        if unmatched_record.amount:
+            # Use the actual invoice amount from the unmatched record
+            invoice_amount = float(unmatched_record.amount)
+        else:
+            # Fall back to calculated amount: Quantity × Master.Product_Price
+            product_price = float(master_pharmacy.product_price or 0.0)
+            invoice_amount = quantity * product_price
+        
+        invoice = Invoice(
+            pharmacy_id=normalized_pharmacy_id,
+            pharmacy_name=unmatched_record.pharmacy_name,
+            product=invoice_product,  # Use master product name for proper matching
+            quantity=quantity,
+            amount=invoice_amount,  # Use actual amount from unmatched record
+            user_id=user_id,
+            master_mapping_id=master_pharmacy.id  # Link to specific master record (doctor)
+        )
+        db.add(invoice)
+        logger.info(f"Created invoice for mapped record: {unmatched_record.pharmacy_name} + {invoice_product} -> {master_pharmacy_id} (Revenue: {invoice_amount})")
+        
         db.commit()
         
         return {"success": True, "message": f"Record {record_id} mapped to master pharmacy {master_pharmacy_id}"}
         
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error mapping record: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to map record")
+        logger.error(f"Error mapping record: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to map record: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/v1/newly-mapped")
+async def get_newly_mapped_records(current_user: User = Depends(get_current_user)):
+    """Get newly mapped records with their mapping details"""
+    try:
+        from app.database import get_db, Unmatched, MasterMapping
+        
+        db = next(get_db())
+        
+        # Get all mapped records
+        mapped_records = db.query(Unmatched).filter(
+            Unmatched.status == "mapped"
+        ).order_by(Unmatched.created_at.desc()).all()
+        
+        result = []
+        for record in mapped_records:
+            # Get master pharmacy details if mapped_to exists
+            master_pharmacy = None
+            if record.mapped_to:
+                master_pharmacy = db.query(MasterMapping).filter(
+                    MasterMapping.pharmacy_id == record.mapped_to
+                ).first()
+            
+            result.append({
+                "id": record.id,
+                "original_pharmacy_name": record.pharmacy_name,
+                "generated_id": record.generated_id,
+                "product": getattr(record, "product", None),
+                "quantity": int(getattr(record, "quantity", 0) or 0),
+                "amount": float(getattr(record, "amount", 0.0) or 0.0),
+                "mapped_to_pharmacy_id": record.mapped_to,
+                "mapped_to_pharmacy_name": master_pharmacy.pharmacy_names if master_pharmacy else None,
+                "mapped_to_product_name": master_pharmacy.product_names if master_pharmacy else None,
+                "mapped_to_doctor_name": master_pharmacy.doctor_names if master_pharmacy else None,
+                "mapped_to_rep_name": master_pharmacy.rep_names if master_pharmacy else None,
+                "mapped_to_hq": master_pharmacy.hq if master_pharmacy else None,
+                "mapped_to_area": master_pharmacy.area if master_pharmacy else None,
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+                "mapped_at": record.created_at.isoformat() if record.created_at else None,  # Using created_at as mapped_at for now
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting newly mapped records: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting newly mapped records: {str(e)}")
+    finally:
+        db.close()
+
+@app.put("/api/v1/newly-mapped/{record_id}")
+async def update_mapping(record_id: int, update_data: Dict = Body(...), current_user: User = Depends(get_current_user)):
+    """Update a mapping for a newly mapped record and update invoice for analytics"""
+    try:
+        from app.database import get_db, Unmatched, MasterMapping, Invoice
+        
+        db = next(get_db())
+        
+        master_pharmacy_id = update_data.get("master_pharmacy_id")
+        if not master_pharmacy_id:
+            raise HTTPException(status_code=400, detail="master_pharmacy_id is required")
+        
+        # Find the unmatched record
+        unmatched_record = db.query(Unmatched).filter(Unmatched.id == record_id).first()
+        if not unmatched_record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        
+        if unmatched_record.status != "mapped":
+            raise HTTPException(status_code=400, detail="Record is not mapped")
+        
+        # Import normalize_product_name for matching
+        from app.tasks_enhanced import normalize_product_name
+        
+        # Normalize pharmacy_id and product for matching
+        normalized_pharmacy_id = str(master_pharmacy_id).replace('-', '_')
+        unmatched_product = unmatched_record.product or ''
+        normalized_unmatched_product = normalize_product_name(unmatched_product)
+        
+        # Find master record that matches BOTH pharmacy_id AND product
+        # This is critical for analytics to work properly
+        master_pharmacy = None
+        master_records = db.query(MasterMapping).filter(
+            MasterMapping.pharmacy_id == master_pharmacy_id
+        ).all()
+        
+        # Try to find exact match on pharmacy + product
+        for record in master_records:
+            normalized_master_product = normalize_product_name(record.product_names or '')
+            if normalized_master_product == normalized_unmatched_product:
+                master_pharmacy = record
+                break
+        
+        # If no exact product match, use the first master record for this pharmacy
+        # (This handles cases where product names don't match exactly)
+        if not master_pharmacy and master_records:
+            master_pharmacy = master_records[0]
+            logger.warning(f"Product mismatch for {unmatched_record.pharmacy_name}: unmatched product '{unmatched_product}' vs master product '{master_pharmacy.product_names}'. Using first master record.")
+        
+        if not master_pharmacy:
+            raise HTTPException(status_code=404, detail="Master pharmacy not found")
+        
+        old_pharmacy_id = unmatched_record.mapped_to
+        
+        # Update the mapping
+        unmatched_record.mapped_to = str(master_pharmacy_id)
+        
+        # Create or update Master Data record for this newly mapped pharmacy+product combination
+        # This ensures the mapped pharmacy appears in Master Data Management
+        invoice_product = master_pharmacy.product_names if master_pharmacy.product_names else unmatched_product
+        
+        # Create TWO master mappings for proper matching (same as in map endpoint)
+        # First: Check/create mapping with the master pharmacy_id
+        existing_master = db.query(MasterMapping).filter(
+            MasterMapping.pharmacy_id == normalized_pharmacy_id,
+            MasterMapping.pharmacy_names == unmatched_record.pharmacy_name,
+            MasterMapping.product_names == invoice_product
+        ).first()
+        
+        if not existing_master:
+            # Create new master mapping record with the master pharmacy_id
+            new_master_mapping = MasterMapping(
+                pharmacy_id=normalized_pharmacy_id,
+                pharmacy_names=unmatched_record.pharmacy_name,
+                product_names=invoice_product,
+                product_id=master_pharmacy.product_id,
+                product_price=master_pharmacy.product_price,
+                doctor_names=master_pharmacy.doctor_names,
+                doctor_id=master_pharmacy.doctor_id,
+                rep_names=master_pharmacy.rep_names,
+                hq=master_pharmacy.hq,
+                area=master_pharmacy.area,
+                source="manual_mapping"
+            )
+            db.add(new_master_mapping)
+            logger.info(f"Created master mapping (MANUAL) for: {unmatched_record.pharmacy_name} + {invoice_product}")
+        
+        # Second: Create mapping with the original generated_id for future uploads
+        original_generated_id = unmatched_record.generated_id
+        if original_generated_id and original_generated_id != 'INVALID' and original_generated_id != normalized_pharmacy_id:
+            normalized_generated_id = original_generated_id.replace('-', '_')
+            
+            existing_variant = db.query(MasterMapping).filter(
+                MasterMapping.pharmacy_id == normalized_generated_id,
+                MasterMapping.pharmacy_names == unmatched_record.pharmacy_name,
+                MasterMapping.product_names == invoice_product
+            ).first()
+            
+            if not existing_variant:
+                variant_mapping = MasterMapping(
+                    pharmacy_id=normalized_generated_id,
+                    pharmacy_names=unmatched_record.pharmacy_name,
+                    product_names=invoice_product,
+                    product_id=master_pharmacy.product_id,
+                    product_price=master_pharmacy.product_price,
+                    doctor_names=master_pharmacy.doctor_names,
+                    doctor_id=master_pharmacy.doctor_id,
+                    rep_names=master_pharmacy.rep_names,
+                    hq=master_pharmacy.hq,
+                    area=master_pharmacy.area,
+                    source="manual_mapping"
+                )
+                db.add(variant_mapping)
+                logger.info(f"Created variant mapping for future uploads: {normalized_generated_id} + {invoice_product}")
+        
+        # Update or create Invoice record for analytics
+        user_id = current_user.id if hasattr(current_user, 'id') else unmatched_record.user_id or 1
+        
+        # Use master product name for invoice to ensure analytics matching works
+        invoice_product = master_pharmacy.product_names if master_pharmacy.product_names else unmatched_product
+        
+        # Find existing invoice created from this unmatched record
+        old_normalized_id = str(old_pharmacy_id).replace('-', '_') if old_pharmacy_id else normalized_pharmacy_id
+        existing_invoice = db.query(Invoice).filter(
+            Invoice.pharmacy_id == old_normalized_id,
+            Invoice.pharmacy_name == unmatched_record.pharmacy_name,
+            Invoice.user_id == user_id
+        ).first()
+        
+        if existing_invoice:
+            # Update existing invoice with new pharmacy and product
+            quantity = int(unmatched_record.quantity or 0)
+            # Use the actual amount from unmatched record if available, otherwise calculate
+            if unmatched_record.amount:
+                invoice_amount = float(unmatched_record.amount)
+            else:
+                product_price = float(master_pharmacy.product_price or 0.0)
+                invoice_amount = quantity * product_price
+            
+            existing_invoice.pharmacy_id = normalized_pharmacy_id
+            existing_invoice.product = invoice_product  # Use master product name
+            existing_invoice.amount = invoice_amount  # Use actual amount from unmatched record
+            existing_invoice.quantity = quantity
+            existing_invoice.master_mapping_id = master_pharmacy.id  # Link to specific master record (doctor)
+            logger.info(f"Updated invoice for remapped record: {unmatched_record.pharmacy_name} + {invoice_product} -> {master_pharmacy_id} (Revenue: {invoice_amount})")
+        else:
+            # Create new invoice
+            quantity = int(unmatched_record.quantity or 0)
+            # Use the actual amount from unmatched record if available, otherwise calculate
+            if unmatched_record.amount:
+                invoice_amount = float(unmatched_record.amount)
+            else:
+                product_price = float(master_pharmacy.product_price or 0.0)
+                invoice_amount = quantity * product_price
+            
+            invoice = Invoice(
+                pharmacy_id=normalized_pharmacy_id,
+                pharmacy_name=unmatched_record.pharmacy_name,
+                product=invoice_product,  # Use master product name
+                quantity=quantity,
+                amount=invoice_amount,  # Use actual amount from unmatched record
+                user_id=user_id,
+                master_mapping_id=master_pharmacy.id  # Link to specific master record (doctor)
+            )
+            db.add(invoice)
+            logger.info(f"Created invoice for remapped record: {unmatched_record.pharmacy_name} + {invoice_product} -> {master_pharmacy_id} (Revenue: {invoice_amount})")
+        
+        db.commit()
+        
+        return {"success": True, "message": f"Mapping updated successfully to {master_pharmacy_id}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating mapping: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating mapping: {str(e)}")
+    finally:
+        db.close()
+
+@app.delete("/api/v1/newly-mapped/{record_id}")
+async def delete_mapping(record_id: int, current_user: User = Depends(get_current_user)):
+    """Delete a mapping and revert record to unmatched status, remove from analytics"""
+    try:
+        from app.database import get_db, Unmatched, Invoice
+        
+        db = next(get_db())
+        
+        # Find the unmatched record
+        unmatched_record = db.query(Unmatched).filter(Unmatched.id == record_id).first()
+        if not unmatched_record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        
+        if unmatched_record.status != "mapped":
+            raise HTTPException(status_code=400, detail="Record is not mapped")
+        
+        # Remove invoice created from this mapping (if exists)
+        user_id = current_user.id if hasattr(current_user, 'id') else unmatched_record.user_id or 1
+        mapped_pharmacy_id = unmatched_record.mapped_to
+        
+        if mapped_pharmacy_id:
+            normalized_pharmacy_id = str(mapped_pharmacy_id).replace('-', '_')
+            # Find and delete invoice created from this mapping
+            # Try to find by pharmacy_id, pharmacy_name, and user_id (product might vary)
+            invoices_to_delete = db.query(Invoice).filter(
+                Invoice.pharmacy_id == normalized_pharmacy_id,
+                Invoice.pharmacy_name == unmatched_record.pharmacy_name,
+                Invoice.user_id == user_id
+            ).all()
+            
+            # If multiple invoices found, try to match by product as well
+            if len(invoices_to_delete) > 1:
+                unmatched_product = unmatched_record.product or ''
+                for inv in invoices_to_delete:
+                    if inv.product == unmatched_product:
+                        db.delete(inv)
+                        logger.info(f"Deleted invoice for unmapped record: {unmatched_record.pharmacy_name} + {unmatched_product}")
+                        break
+            elif len(invoices_to_delete) == 1:
+                db.delete(invoices_to_delete[0])
+                logger.info(f"Deleted invoice for unmapped record: {unmatched_record.pharmacy_name}")
+        
+        # Revert to pending status and clear mapped_to
+        unmatched_record.status = "pending"
+        unmatched_record.mapped_to = None
+        db.commit()
+        
+        return {"success": True, "message": "Mapping deleted successfully. Record reverted to unmatched status."}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting mapping: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting mapping: {str(e)}")
+    finally:
+        db.close()
 
 @app.post("/api/v1/unmatched/{record_id}/ignore")
 async def ignore_record(record_id: int, current_user: User = Depends(get_current_user)):
@@ -1590,19 +2086,22 @@ async def clear_recent_uploads_admin(current_user: User = Depends(get_current_us
     finally:
         db.close()
 
-@app.post("/api/v1/admin/reset-memory")
-async def reset_memory_admin(current_user: User = Depends(get_current_user)):
-    """Reset system memory - clear all data"""
+@app.post("/api/v1/admin/reset-system")
+async def reset_system_admin(current_user: User = Depends(get_current_user)):
+    """Reset system data - clear all data except master data management and split rules"""
     if current_user.role not in ['super_admin', 'admin']:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     
     try:
-        from app.database import get_db, Invoice, MasterMapping, Unmatched, RecentUpload, AuditLog
+        from app.database import get_db, Invoice, Unmatched, RecentUpload, AuditLog, ProductReference, MasterSplitRule
         db = next(get_db())
         
-        # Clear all data tables
+        # Capture counts before reset (should remain unchanged)
+        product_data_count_before = db.query(ProductReference).count()
+        split_rules_count_before = db.query(MasterSplitRule).count()
+        
+        # Clear all data tables except MasterMapping, ProductReference, and MasterSplitRule
         db.query(Invoice).delete()
-        db.query(MasterMapping).delete()
         db.query(Unmatched).delete()
         db.query(RecentUpload).delete()
         db.query(AuditLog).delete()
@@ -1618,51 +2117,51 @@ async def reset_memory_admin(current_user: User = Depends(get_current_user)):
         
         db.commit()
         
-        return {"message": "System memory reset successfully", "success": True}
+        # Re-check counts to ensure they're preserved
+        product_data_count_after = db.query(ProductReference).count()
+        split_rules_count_after = db.query(MasterSplitRule).count()
+        
+        return {
+            "message": "System data reset successfully (Master data, Product data, and Split rules preserved)",
+            "success": True,
+            "product_data_preserved": product_data_count_after == product_data_count_before,
+            "product_data_count": product_data_count_after,
+            "split_rules_preserved": split_rules_count_after == split_rules_count_before,
+            "split_rules_count": split_rules_count_after
+        }
         
     except Exception as e:
-        print(f"Error resetting memory: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error resetting memory: {str(e)}")
+        logger.error(f"Error resetting system: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error resetting system: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/api/v1/admin/reset-master-data")
+async def reset_master_data_admin(current_user: User = Depends(get_current_user)):
+    """Reset master data management only"""
+    if current_user.role not in ['super_admin', 'admin']:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    
+    try:
+        from app.database import get_db, MasterMapping
+        db = next(get_db())
+        
+        # Clear only MasterMapping table
+        db.query(MasterMapping).delete()
+        
+        db.commit()
+        
+        return {"message": "Master data reset successfully", "success": True}
+        
+    except Exception as e:
+        logger.error(f"Error resetting master data: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error resetting master data: {str(e)}")
     finally:
         db.close()
 
 # Unmatched Records Management
-@app.post("/api/v1/unmatched/{record_id}/map")
-async def map_unmatched_record(record_id: int, request: dict, current_user: User = Depends(get_current_user)):
-    """Map an unmatched record to a master pharmacy"""
-    try:
-        from app.database import get_db
-        db = next(get_db())
-        
-        master_pharmacy_id = request.get('master_pharmacy_id')
-        if not master_pharmacy_id:
-            raise HTTPException(status_code=400, detail="master_pharmacy_id is required")
-        
-        # Find the unmatched record
-        unmatched_record = db.query(Unmatched).filter(Unmatched.id == record_id).first()
-        if not unmatched_record:
-            raise HTTPException(status_code=404, detail="Unmatched record not found")
-        
-        # Find the master pharmacy
-        master_pharmacy = db.query(MasterMapping).filter(
-            MasterMapping.pharmacy_id == master_pharmacy_id
-        ).first()
-        if not master_pharmacy:
-            raise HTTPException(status_code=404, detail="Master pharmacy not found")
-        
-        # Update the unmatched record
-        unmatched_record.status = "mapped"
-        unmatched_record.mapped_to = master_pharmacy.pharmacy_names
-        
-        db.commit()
-        
-        return {"message": "Record mapped successfully", "success": True}
-        
-    except Exception as e:
-        print(f"Error mapping record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error mapping record: {str(e)}")
-    finally:
-        db.close()
 
 @app.post("/api/v1/unmatched/{record_id}/ignore")
 async def ignore_unmatched_record(record_id: int, current_user: User = Depends(get_current_user)):
@@ -1713,6 +2212,864 @@ async def get_master_pharmacies(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error getting master pharmacies: {str(e)}")
     finally:
         db.close()
+
+@app.get("/api/v1/master-data")
+async def get_master_data(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user)
+):
+    """Get all master data with pagination"""
+    try:
+        from app.database import get_db, MasterMapping
+        db = next(get_db())
+        
+        # Get total count
+        total = db.query(MasterMapping).count()
+        
+        # Get paginated data
+        master_records = db.query(MasterMapping).offset(skip).limit(limit).all()
+        
+        result = []
+        for record in master_records:
+            result.append({
+                "id": record.id,
+                "pharmacy_id": record.pharmacy_id,
+                "pharmacy_names": record.pharmacy_names,
+                "product_names": record.product_names,
+                "product_id": record.product_id,
+                "product_price": float(record.product_price) if record.product_price else None,
+                "doctor_names": record.doctor_names,
+                "doctor_id": record.doctor_id,
+                "rep_names": record.rep_names,
+                "hq": record.hq,
+                "area": record.area,
+                "source": getattr(record, "source", "file_upload")  # Default to file_upload for old records
+            })
+        
+        return {
+            "data": result,
+            "total": total,
+            "skip": skip,
+            "limit": limit
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting master data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting master data: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/api/v1/master-data")
+async def create_master_data(
+    record_data: Dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new master data record"""
+    try:
+        from app.database import get_db, MasterMapping
+        db = next(get_db())
+        
+        # Validate required fields
+        if not record_data.get("pharmacy_id") or not record_data.get("pharmacy_names"):
+            raise HTTPException(status_code=400, detail="pharmacy_id and pharmacy_names are required")
+        
+        # Create new master mapping record
+        new_record = MasterMapping(
+            pharmacy_id=record_data.get("pharmacy_id"),
+            pharmacy_names=record_data.get("pharmacy_names"),
+            product_names=record_data.get("product_names"),
+            product_id=record_data.get("product_id"),
+            product_price=record_data.get("product_price"),
+            doctor_names=record_data.get("doctor_names"),
+            doctor_id=record_data.get("doctor_id"),
+            rep_names=record_data.get("rep_names"),
+            hq=record_data.get("hq"),
+            area=record_data.get("area")
+        )
+        
+        db.add(new_record)
+        db.commit()
+        db.refresh(new_record)
+        
+        return {
+            "id": new_record.id,
+            "pharmacy_id": new_record.pharmacy_id,
+            "pharmacy_names": new_record.pharmacy_names,
+            "product_names": new_record.product_names,
+            "product_id": new_record.product_id,
+            "product_price": float(new_record.product_price) if new_record.product_price else None,
+            "doctor_names": new_record.doctor_names,
+            "doctor_id": new_record.doctor_id,
+            "rep_names": new_record.rep_names,
+            "hq": new_record.hq,
+            "area": new_record.area,
+            "source": getattr(new_record, "source", "file_upload")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating master data: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating master data: {str(e)}")
+    finally:
+        db.close()
+
+@app.put("/api/v1/master-data/{record_id}")
+async def update_master_data(
+    record_id: int,
+    update_data: Dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Update a master data record"""
+    try:
+        from app.database import get_db, MasterMapping
+        db = next(get_db())
+        
+        # Get the record
+        record = db.query(MasterMapping).filter(MasterMapping.id == record_id).first()
+        
+        if not record:
+            raise HTTPException(status_code=404, detail="Master data record not found")
+        
+        # Update fields
+        if "pharmacy_id" in update_data:
+            record.pharmacy_id = update_data["pharmacy_id"]
+        if "pharmacy_names" in update_data:
+            record.pharmacy_names = update_data["pharmacy_names"]
+        if "product_names" in update_data:
+            record.product_names = update_data["product_names"]
+        if "product_id" in update_data:
+            record.product_id = update_data["product_id"]
+        if "product_price" in update_data:
+            record.product_price = update_data["product_price"]
+        if "doctor_names" in update_data:
+            record.doctor_names = update_data["doctor_names"]
+        if "doctor_id" in update_data:
+            record.doctor_id = update_data["doctor_id"]
+        if "rep_names" in update_data:
+            record.rep_names = update_data["rep_names"]
+        if "hq" in update_data:
+            record.hq = update_data["hq"]
+        if "area" in update_data:
+            record.area = update_data["area"]
+        
+        db.commit()
+        db.refresh(record)
+        
+        return {
+            "id": record.id,
+            "pharmacy_id": record.pharmacy_id,
+            "pharmacy_names": record.pharmacy_names,
+            "product_names": record.product_names,
+            "product_id": record.product_id,
+            "product_price": float(record.product_price) if record.product_price else None,
+            "doctor_names": record.doctor_names,
+            "doctor_id": record.doctor_id,
+            "rep_names": record.rep_names,
+            "hq": record.hq,
+            "area": record.area,
+            "source": getattr(record, "source", "file_upload")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating master data: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating master data: {str(e)}")
+    finally:
+        db.close()
+
+@app.delete("/api/v1/master-data/{record_id}")
+async def delete_master_data(
+    record_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a master data record"""
+    try:
+        from app.database import get_db, MasterMapping
+        db = next(get_db())
+        
+        # Get the record
+        record = db.query(MasterMapping).filter(MasterMapping.id == record_id).first()
+        
+        if not record:
+            raise HTTPException(status_code=404, detail="Master data record not found")
+        
+        db.delete(record)
+        db.commit()
+        
+        return {"message": "Master data record deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting master data: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting master data: {str(e)}")
+    finally:
+        db.close()
+
+# Split Rule Management Endpoints
+@app.get("/api/v1/master-data/duplicates")
+async def get_duplicate_master_combinations(current_user: User = Depends(get_current_user)):
+    """Get all pharmacy+product combinations that have multiple master records"""
+    try:
+        from app.database import get_db, MasterMapping
+        from sqlalchemy import func
+        from app.tasks_enhanced import normalize_product_name
+        
+        db = next(get_db())
+        
+        # Get all master records
+        all_records = db.query(MasterMapping).all()
+        
+        # Group by pharmacy_id + normalized_product
+        combinations = {}
+        for record in all_records:
+            normalized_product = normalize_product_name(record.product_names)
+            key = f"{record.pharmacy_id}|{normalized_product}"
+            
+            if key not in combinations:
+                combinations[key] = {
+                    "pharmacy_id": record.pharmacy_id,
+                    "pharmacy_name": record.pharmacy_names,
+                    "product_name": record.product_names,
+                    "normalized_product": normalized_product,
+                    "records": []
+                }
+            
+            combinations[key]["records"].append({
+                "id": record.id,
+                "doctor_name": record.doctor_names,
+                "doctor_id": record.doctor_id,
+                "rep_name": record.rep_names,
+                "hq": record.hq,
+                "area": record.area,
+                "price": float(record.product_price) if record.product_price else 0.0
+            })
+        
+        # Filter to only duplicates
+        duplicates = [combo for combo in combinations.values() if len(combo["records"]) > 1]
+        
+        logger.info(f"Found {len(duplicates)} duplicate pharmacy+product combinations")
+        
+        return {"duplicates": duplicates, "total": len(duplicates)}
+        
+    except Exception as e:
+        logger.error(f"Error fetching duplicates: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching duplicates: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/v1/split-rules")
+async def get_split_rules(current_user: User = Depends(get_current_user)):
+    """Get all split rules"""
+    try:
+        from app.database import get_db, MasterSplitRule
+        db = next(get_db())
+        
+        rules = db.query(MasterSplitRule).all()
+        
+        result = []
+        for rule in rules:
+            result.append({
+                "id": rule.id,
+                "pharmacy_id": rule.pharmacy_id,
+                "product_key": rule.product_key,
+                "rules": rule.rules,
+                "updated_by": rule.updated_by,
+                "updated_at": rule.updated_at.isoformat() if rule.updated_at else None,
+                "created_at": rule.created_at.isoformat() if rule.created_at else None
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching split rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching split rules: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/api/v1/split-rules")
+async def create_split_rule(
+    rule_data: Dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Create or update a split rule and retroactively apply to existing invoices"""
+    try:
+        from app.database import get_db, MasterSplitRule, MasterMapping, Invoice
+        from app.tasks_enhanced import normalize_product_name
+        db = next(get_db())
+        
+        pharmacy_id = rule_data.get("pharmacy_id")
+        product_key = rule_data.get("product_key")
+        rules = rule_data.get("rules", [])
+        
+        if not pharmacy_id or not product_key:
+            raise HTTPException(status_code=400, detail="pharmacy_id and product_key are required")
+        
+        if not rules or not isinstance(rules, list):
+            raise HTTPException(status_code=400, detail="rules must be a non-empty list")
+        
+        # Validate rules format and sum to 100
+        total_ratio = 0
+        for entry in rules:
+            if "master_mapping_id" not in entry or "ratio" not in entry:
+                raise HTTPException(status_code=400, detail="Each rule must have master_mapping_id and ratio")
+            total_ratio += entry.get("ratio", 0)
+        
+        if abs(total_ratio - 100) > 0.1:
+            raise HTTPException(status_code=400, detail=f"Ratios must sum to 100% (current: {total_ratio}%)")
+        
+        # Get master records for validation
+        master_record_map = {}
+        for entry in rules:
+            master_rec = db.query(MasterMapping).filter_by(id=entry["master_mapping_id"]).first()
+            if not master_rec:
+                raise HTTPException(status_code=400, detail=f"Master mapping ID {entry['master_mapping_id']} not found")
+            master_record_map[entry["master_mapping_id"]] = master_rec
+        
+        # Check if rule already exists
+        existing_rule = db.query(MasterSplitRule).filter_by(
+            pharmacy_id=pharmacy_id,
+            product_key=product_key
+        ).first()
+        
+        if existing_rule:
+            # Update existing rule
+            existing_rule.rules = rules
+            existing_rule.updated_by = current_user.id
+            existing_rule.updated_at = datetime.utcnow()
+            message = "Split rule updated and applied to existing invoices"
+        else:
+            # Create new rule
+            new_rule = MasterSplitRule(
+                pharmacy_id=pharmacy_id,
+                product_key=product_key,
+                rules=rules,
+                updated_by=current_user.id
+            )
+            db.add(new_rule)
+            message = "Split rule created and applied to existing invoices"
+        
+        db.commit()
+        
+        # Retroactively apply to existing invoices
+        # Extract normalized product from product_key (format: "pharmacy_id|EXACT|normalized_product")
+        parts = product_key.split("|")
+        if len(parts) >= 3:
+            match_type = parts[1]  # EXACT or PID
+            if match_type == "EXACT":
+                normalized_product = parts[2]
+            else:
+                # For PID matches, we need to get the product from master records
+                normalized_product = normalize_product_name(list(master_record_map.values())[0].product_names)
+        else:
+            normalized_product = ""
+        
+        # Find all invoices for this pharmacy that match the product
+        from app.tasks_enhanced import normalize_product_name as norm_prod
+        existing_invoices = db.query(Invoice).filter_by(pharmacy_id=pharmacy_id).all()
+        
+        invoices_to_split = []
+        for inv in existing_invoices:
+            inv_normalized = norm_prod(inv.product)
+            if inv_normalized == normalized_product:
+                invoices_to_split.append(inv)
+        
+        if invoices_to_split:
+            logger.info(f"Retroactively applying split rule to {len(invoices_to_split)} existing invoices")
+            
+            # Delete old invoices and create split ones
+            for old_invoice in invoices_to_split:
+                quantity = old_invoice.quantity
+                total_amount = old_invoice.amount
+                pharmacy_name = old_invoice.pharmacy_name
+                product = old_invoice.product
+                user_id = old_invoice.user_id
+                invoice_date = old_invoice.invoice_date
+                
+                # Delete old invoice
+                db.delete(old_invoice)
+                
+                # Create split invoices
+                for entry in rules:
+                    master_record = master_record_map.get(entry["master_mapping_id"])
+                    if not master_record:
+                        continue
+                    
+                    ratio = entry.get("ratio", 0) / 100.0  # Convert to decimal
+                    allocated_quantity = int(quantity * ratio)
+                    allocated_amount = total_amount * ratio
+                    
+                    new_invoice = Invoice(
+                        pharmacy_id=pharmacy_id,
+                        pharmacy_name=pharmacy_name,
+                        product=product,
+                        quantity=allocated_quantity,
+                        amount=allocated_amount,
+                        user_id=user_id,
+                        invoice_date=invoice_date,
+                        created_at=old_invoice.created_at,
+                        master_mapping_id=master_record.id  # Link to specific master record (doctor)
+                    )
+                    db.add(new_invoice)
+            
+            db.commit()
+            logger.info(f"Split {len(invoices_to_split)} existing invoices into {len(invoices_to_split) * len(rules)} new invoices")
+            message += f" ({len(invoices_to_split)} existing invoices reprocessed)"
+        
+        # Clear analytics cache to force refresh
+        try:
+            import redis
+            redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+            # Clear all analytics cache keys for all users
+            cache_keys = redis_client.keys("analytics_*")
+            if cache_keys:
+                redis_client.delete(*cache_keys)
+                logger.info(f"Cleared {len(cache_keys)} analytics cache keys after split rule update")
+        except Exception as cache_error:
+            # Redis might not be available, log but don't fail
+            logger.warning(f"Could not clear analytics cache: {str(cache_error)}")
+        
+        return {"message": message, "invoices_reprocessed": len(invoices_to_split)}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating/updating split rule: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating/updating split rule: {str(e)}")
+    finally:
+        db.close()
+
+@app.delete("/api/v1/split-rules/{rule_id}")
+async def delete_split_rule(
+    rule_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a split rule"""
+    try:
+        from app.database import get_db, MasterSplitRule
+        db = next(get_db())
+        
+        rule = db.query(MasterSplitRule).filter(MasterSplitRule.id == rule_id).first()
+        
+        if not rule:
+            raise HTTPException(status_code=404, detail="Split rule not found")
+        
+        db.delete(rule)
+        db.commit()
+        
+        # Clear analytics cache to force refresh
+        try:
+            import redis
+            redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+            # Clear all analytics cache keys for all users
+            cache_keys = redis_client.keys("analytics_*")
+            if cache_keys:
+                redis_client.delete(*cache_keys)
+                logger.info(f"Cleared {len(cache_keys)} analytics cache keys after split rule deletion")
+        except Exception as cache_error:
+            # Redis might not be available, log but don't fail
+            logger.warning(f"Could not clear analytics cache: {str(cache_error)}")
+        
+        return {"message": "Split rule deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting split rule: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting split rule: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/v1/split-rules/export")
+async def export_split_rules(format: str = "xlsx", current_user: User = Depends(get_current_user)):
+    """Export all split rules to Excel or CSV for backup"""
+    try:
+        from app.database import get_db, MasterSplitRule, MasterMapping
+        from fastapi.responses import Response
+        import io
+        import json
+        
+        db = next(get_db())
+        
+        # Get all split rules
+        rules = db.query(MasterSplitRule).all()
+        
+        export_data = []
+        for rule in rules:
+            # Get master records to get doctor names
+            master_records = {}
+            if rule.rules:
+                for rule_entry in rule.rules:
+                    master_id = rule_entry.get("master_mapping_id")
+                    if master_id:
+                        master = db.query(MasterMapping).filter(MasterMapping.id == master_id).first()
+                        if master:
+                            master_records[master_id] = master
+            
+            # Build export rows - one per doctor in the rule
+            for rule_entry in (rule.rules or []):
+                master_id = rule_entry.get("master_mapping_id")
+                ratio = rule_entry.get("ratio", 0)
+                master = master_records.get(master_id)
+                
+                export_data.append({
+                    "Pharmacy_ID": rule.pharmacy_id or "",
+                    "Product_Key": rule.product_key or "",
+                    "Master_Mapping_ID": master_id,
+                    "Doctor_Name": master.doctor_names if master else "",
+                    "Doctor_ID": master.doctor_id if master else "",
+                    "Ratio_Percentage": ratio,
+                    "Updated_By": rule.updated_by or "",
+                    "Updated_At": rule.updated_at.isoformat() if rule.updated_at else "",
+                    "Created_At": rule.created_at.isoformat() if rule.created_at else ""
+                })
+        
+        db.close()
+        
+        if not export_data:
+            raise HTTPException(status_code=404, detail="No split rules found to export")
+        
+        if format.lower() == "csv":
+            import csv
+            output = io.StringIO()
+            fieldnames = ["Pharmacy_ID", "Product_Key", "Master_Mapping_ID", "Doctor_Name", "Doctor_ID", 
+                         "Ratio_Percentage", "Updated_By", "Updated_At", "Created_At"]
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(export_data)
+            return Response(
+                content=output.getvalue(), 
+                media_type="text/csv", 
+                headers={"Content-Disposition": "attachment; filename=split_rules_backup.csv"}
+            )
+        elif format.lower() == "xlsx":
+            df = pd.DataFrame(export_data)
+            output = io.BytesIO()
+            df.to_excel(output, index=False, engine='openpyxl')
+            output.seek(0)
+            return Response(
+                content=output.getvalue(), 
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                headers={"Content-Disposition": "attachment; filename=split_rules_backup.xlsx"}
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format. Use 'csv' or 'xlsx'")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting split rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error exporting split rules: {str(e)}")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+@app.post("/api/v1/split-rules/import")
+async def import_split_rules(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Import split rules from Excel file"""
+    try:
+        from app.database import get_db, MasterSplitRule, MasterMapping
+        import io
+        
+        db = next(get_db())
+        
+        # Read Excel file
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+        
+        # Required columns
+        required_columns = ["Pharmacy_ID", "Product_Key", "Master_Mapping_ID", "Ratio_Percentage"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Missing required columns: {', '.join(missing_columns)}"
+            )
+        
+        # Group by Pharmacy_ID + Product_Key to create split rules
+        rules_by_key = {}
+        errors = []
+        imported_count = 0
+        updated_count = 0
+        
+        for idx, row in df.iterrows():
+            try:
+                pharmacy_id = str(row["Pharmacy_ID"]).strip()
+                product_key = str(row["Product_Key"]).strip()
+                master_mapping_id = int(row["Master_Mapping_ID"])
+                ratio = float(row["Ratio_Percentage"])
+                
+                # Validate master mapping exists
+                master = db.query(MasterMapping).filter(MasterMapping.id == master_mapping_id).first()
+                if not master:
+                    errors.append(f"Row {idx + 2}: Master mapping ID {master_mapping_id} not found")
+                    continue
+                
+                # Group by pharmacy_id + product_key
+                key = f"{pharmacy_id}|{product_key}"
+                if key not in rules_by_key:
+                    rules_by_key[key] = {
+                        "pharmacy_id": pharmacy_id,
+                        "product_key": product_key,
+                        "rules": []
+                    }
+                
+                rules_by_key[key]["rules"].append({
+                    "master_mapping_id": master_mapping_id,
+                    "ratio": ratio
+                })
+                
+            except Exception as e:
+                errors.append(f"Row {idx + 2}: {str(e)}")
+                continue
+        
+        # Create or update split rules
+        for key, rule_data in rules_by_key.items():
+            # Validate ratios sum to 100
+            total_ratio = sum(r["ratio"] for r in rule_data["rules"])
+            if abs(total_ratio - 100) > 0.1:
+                errors.append(f"Pharmacy {rule_data['pharmacy_id']} + Product {rule_data['product_key']}: Ratios sum to {total_ratio}% (must be 100%)")
+                continue
+            
+            # Check if rule exists
+            existing_rule = db.query(MasterSplitRule).filter_by(
+                pharmacy_id=rule_data["pharmacy_id"],
+                product_key=rule_data["product_key"]
+            ).first()
+            
+            if existing_rule:
+                # Update existing rule
+                existing_rule.rules = rule_data["rules"]
+                existing_rule.updated_by = current_user.id
+                existing_rule.updated_at = datetime.utcnow()
+                updated_count += 1
+            else:
+                # Create new rule
+                new_rule = MasterSplitRule(
+                    pharmacy_id=rule_data["pharmacy_id"],
+                    product_key=rule_data["product_key"],
+                    rules=rule_data["rules"],
+                    updated_by=current_user.id
+                )
+                db.add(new_rule)
+                imported_count += 1
+        
+        db.commit()
+        
+        message = f"Import completed: {imported_count} new rules, {updated_count} updated rules"
+        if errors:
+            message += f". {len(errors)} errors occurred."
+        
+        return {
+            "message": message,
+            "imported": imported_count,
+            "updated": updated_count,
+            "errors": errors[:10]  # Return first 10 errors
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error importing split rules: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error importing split rules: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/v1/master-data/unique-values")
+async def get_master_data_unique_values(current_user: User = Depends(get_current_user)):
+    """Get unique values for all master data fields for dropdowns with mappings"""
+    try:
+        from app.database import get_db, MasterMapping
+        from sqlalchemy import func
+        
+        db = next(get_db())
+        
+        # Get all records to build mappings
+        all_records = db.query(MasterMapping).all()
+        
+        # Build mappings for auto-fill
+        pharmacy_id_to_name = {}  # pharmacy_id -> pharmacy_name
+        pharmacy_name_to_id = {}  # pharmacy_name -> pharmacy_id
+        product_name_to_id = {}   # product_name -> product_id
+        product_id_to_name = {}   # product_id -> product_name
+        doctor_name_to_id = {}    # doctor_name -> doctor_id
+        doctor_id_to_name = {}    # doctor_id -> doctor_name
+        
+        for record in all_records:
+            # Pharmacy mappings
+            if record.pharmacy_id and record.pharmacy_names:
+                pharmacy_id_to_name[record.pharmacy_id] = record.pharmacy_names
+                pharmacy_name_to_id[record.pharmacy_names] = record.pharmacy_id
+            
+            # Product mappings
+            if record.product_names and record.product_id:
+                product_name_to_id[record.product_names] = record.product_id
+                product_id_to_name[record.product_id] = record.product_names
+            
+            # Doctor mappings
+            if record.doctor_names and record.doctor_id:
+                doctor_name_to_id[record.doctor_names] = record.doctor_id
+                doctor_id_to_name[record.doctor_id] = record.doctor_names
+        
+        # Get unique values
+        pharmacy_ids = db.query(MasterMapping.pharmacy_id).distinct().all()
+        unique_pharmacy_ids = sorted([p[0] for p in pharmacy_ids if p[0]])
+        
+        pharmacy_names = db.query(MasterMapping.pharmacy_names).distinct().all()
+        unique_pharmacy_names = sorted([p[0] for p in pharmacy_names if p[0]])
+        
+        product_names = db.query(MasterMapping.product_names).distinct().all()
+        unique_product_names = sorted([p[0] for p in product_names if p[0]])
+        
+        product_ids = db.query(MasterMapping.product_id).distinct().all()
+        unique_product_ids = sorted([p[0] for p in product_ids if p[0]])
+        
+        doctor_names = db.query(MasterMapping.doctor_names).distinct().all()
+        unique_doctor_names = sorted([d[0] for d in doctor_names if d[0]])
+        
+        doctor_ids = db.query(MasterMapping.doctor_id).distinct().all()
+        unique_doctor_ids = sorted([d[0] for d in doctor_ids if d[0]])
+        
+        rep_names = db.query(MasterMapping.rep_names).distinct().all()
+        unique_rep_names = sorted([r[0] for r in rep_names if r[0]])
+        
+        hqs = db.query(MasterMapping.hq).distinct().all()
+        unique_hqs = sorted([h[0] for h in hqs if h[0]])
+        
+        areas = db.query(MasterMapping.area).distinct().all()
+        unique_areas = sorted([a[0] for a in areas if a[0]])
+        
+        db.close()
+        
+        return {
+            "pharmacy_ids": unique_pharmacy_ids,
+            "pharmacy_names": unique_pharmacy_names,
+            "product_names": unique_product_names,
+            "product_ids": unique_product_ids,
+            "doctor_names": unique_doctor_names,
+            "doctor_ids": unique_doctor_ids,
+            "rep_names": unique_rep_names,
+            "hqs": unique_hqs,
+            "areas": unique_areas,
+            "mappings": {
+                "pharmacy_id_to_name": pharmacy_id_to_name,
+                "pharmacy_name_to_id": pharmacy_name_to_id,
+                "product_name_to_id": product_name_to_id,
+                "product_id_to_name": product_id_to_name,
+                "doctor_name_to_id": doctor_name_to_id,
+                "doctor_id_to_name": doctor_id_to_name,
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting unique values: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting unique values: {str(e)}")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+@app.get("/api/v1/master-data/export")
+async def export_master_data(format: str = "xlsx", current_user: User = Depends(get_current_user)):
+    """Export all master data to Excel or CSV for backup"""
+    try:
+        from app.database import get_db, MasterMapping
+        from fastapi.responses import Response
+        import io
+        
+        db = next(get_db())
+        
+        # Get ALL master data records
+        records = db.query(MasterMapping).all()
+        
+        export_data = [
+            {
+                "Pharmacy_ID": r.pharmacy_id,
+                "Pharmacy_Name": r.pharmacy_names,
+                "Product_Name": r.product_names or "",
+                "Product_ID": r.product_id or "",
+                "Product_Price": float(r.product_price) if r.product_price else 0.0,
+                "Doctor_Name": r.doctor_names or "",
+                "Doctor_ID": r.doctor_id or "",
+                "Rep_Name": r.rep_names or "",
+                "HQ": r.hq or "",
+                "Area": r.area or "",
+                "Source": getattr(r, "source", "file_upload"),
+                "Created_At": r.created_at.isoformat() if r.created_at else ""
+            }
+            for r in records
+        ]
+        
+        db.close()
+        
+        # Ensure at least headers exist
+        if not export_data:
+            export_data = [{
+                "Pharmacy_ID": "",
+                "Pharmacy_Name": "",
+                "Product_Name": "",
+                "Product_ID": "",
+                "Product_Price": 0.0,
+                "Doctor_Name": "",
+                "Doctor_ID": "",
+                "Rep_Name": "",
+                "HQ": "",
+                "Area": "",
+                "Source": "",
+                "Created_At": ""
+            }]
+        
+        if format.lower() == "csv":
+            import csv
+            output = io.StringIO()
+            fieldnames = ["Pharmacy_ID", "Pharmacy_Name", "Product_Name", "Product_ID", "Product_Price", 
+                         "Doctor_Name", "Doctor_ID", "Rep_Name", "HQ", "Area", "Source", "Created_At"]
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(export_data)
+            return Response(
+                content=output.getvalue(), 
+                media_type="text/csv", 
+                headers={"Content-Disposition": "attachment; filename=master_data_backup.csv"}
+            )
+        elif format.lower() == "xlsx":
+            df = pd.DataFrame(export_data)
+            output = io.BytesIO()
+            df.to_excel(output, index=False, engine='openpyxl')
+            output.seek(0)
+            return Response(
+                content=output.getvalue(), 
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                headers={"Content-Disposition": "attachment; filename=master_data_backup.xlsx"}
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format. Use 'csv' or 'xlsx'")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting master data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error exporting master data: {str(e)}")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 # Recent Uploads Management
 @app.get("/api/v1/uploads/{upload_id}/details")
@@ -1864,14 +3221,42 @@ async def export_upload_data(upload_id: int, format: str = 'csv', current_user: 
 @app.post("/api/v1/generator/generate", response_model=IdGenerationResponse)
 async def generate_id_endpoint(request: IdGenerationRequest, current_user: User = Depends(get_current_user)):
     """Generate a standardized ID for pharmacy, product, or doctor"""
+    db = None
     try:
+        from app.database import get_db
+        
         if request.type not in ['pharmacy', 'product', 'doctor']:
             raise HTTPException(status_code=400, detail="Invalid type. Must be 'pharmacy', 'product', or 'doctor'")
         
         if not request.name or not request.name.strip():
             raise HTTPException(status_code=400, detail="Name cannot be empty")
         
-        generated_id = generate_id(request.name.strip(), request.type)
+        db = next(get_db())
+        
+        if request.type == 'product':
+            # Product ID generation requires reference table matching
+            from app.product_id_generator import generate_product_id
+            product_id, price, matched_original = generate_product_id(request.name.strip(), db)
+            
+            if product_id:
+                generated_id = str(product_id)
+                # Include price and matched name in response
+                return IdGenerationResponse(
+                    original_name=request.name.strip(),
+                    generated_id=generated_id,
+                    type=request.type,
+                    timestamp=datetime.now().isoformat(),
+                    metadata={"price": price, "matched_original": matched_original} if matched_original else None
+                )
+            else:
+                raise HTTPException(status_code=404, detail=f"Product '{request.name.strip()}' not found in reference table. Please upload product reference table first.")
+        
+        elif request.type == 'doctor':
+            # Doctor ID generation with counter
+            generated_id = generate_id(request.name.strip(), request.type, db)
+        else:
+            # Pharmacy ID generation
+            generated_id = generate_id(request.name.strip(), request.type, db)
         
         return IdGenerationResponse(
             original_name=request.name.strip(),
@@ -1883,12 +3268,20 @@ async def generate_id_endpoint(request: IdGenerationRequest, current_user: User 
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error generating ID: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating ID: {str(e)}")
+    finally:
+        if db:
+            db.close()
 
 @app.post("/api/v1/generator/batch", response_model=List[IdGenerationResponse])
 async def generate_batch_ids(requests: List[IdGenerationRequest], current_user: User = Depends(get_current_user)):
     """Generate multiple IDs in batch"""
+    db = None
     try:
+        from app.database import get_db
+        db = next(get_db())
+        
         results = []
         for request in requests:
             if request.type not in ['pharmacy', 'product', 'doctor']:
@@ -1897,8 +3290,19 @@ async def generate_batch_ids(requests: List[IdGenerationRequest], current_user: 
             if not request.name or not request.name.strip():
                 continue
             
-            generated_id = generate_id(request.name.strip(), request.type)
-            
+            if request.type == 'product':
+                from app.product_id_generator import generate_product_id
+                product_id, price, matched_original = generate_product_id(request.name.strip(), db)
+                if product_id:
+                    results.append(IdGenerationResponse(
+                        original_name=request.name.strip(),
+                        generated_id=str(product_id),
+                        type=request.type,
+                        timestamp=datetime.now().isoformat(),
+                        metadata={"price": price, "matched_original": matched_original} if matched_original else None
+                    ))
+            else:
+                generated_id = generate_id(request.name.strip(), request.type, db)
             results.append(IdGenerationResponse(
                 original_name=request.name.strip(),
                 generated_id=generated_id,
@@ -1909,7 +3313,326 @@ async def generate_batch_ids(requests: List[IdGenerationRequest], current_user: 
         return results
     
     except Exception as e:
+        logger.error(f"Error generating batch IDs: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating batch IDs: {str(e)}")
+    finally:
+        if db:
+            db.close()
+
+@app.post("/api/v1/generator/upload-product-reference")
+async def upload_product_reference(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Upload product reference table Excel file (Product Name, mprice columns)"""
+    try:
+        from app.database import get_db, ProductReference
+        import tempfile
+        import os
+        
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="File must be an Excel file")
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            # Read Excel file
+            df = pd.read_excel(tmp_file_path, engine='openpyxl')
+            
+            # Find columns (flexible naming)
+            product_col = None
+            price_col = None
+            
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'product' in col_lower and 'name' in col_lower:
+                    product_col = col
+                elif 'mprice' in col_lower or ('price' in col_lower and 'm' in col_lower):
+                    price_col = col
+            
+            if not product_col or not price_col:
+                raise HTTPException(status_code=400, detail="Excel file must contain 'Product Name' and 'mprice' columns")
+            
+            db = next(get_db())
+            
+            try:
+                # Clear existing reference data (optional - you might want to keep it)
+                # db.query(ProductReference).delete()
+                
+                # Process each row
+                records_added = 0
+                records_updated = 0
+                
+                for index, row in df.iterrows():
+                    product_name = str(row[product_col]).strip()
+                    try:
+                        price = float(row[price_col])
+                    except (ValueError, TypeError):
+                        logger.warning(f"Row {index + 2}: Invalid price, skipping")
+                        continue
+                    
+                    if pd.isna(product_name) or not product_name:
+                        continue
+                    
+                    # Assign sequential ID starting from 1
+                    product_id = index + 1
+                    
+                    # Check if product already exists
+                    existing = db.query(ProductReference).filter(
+                        ProductReference.product_name == product_name
+                    ).first()
+                    
+                    if existing:
+                        # Update existing record
+                        existing.product_price = price
+                        existing.product_id = product_id
+                        records_updated += 1
+                    else:
+                        # Create new record
+                        new_ref = ProductReference(
+                            product_name=product_name,
+                            product_id=product_id,
+                            product_price=price
+                        )
+                        db.add(new_ref)
+                        records_added += 1
+                
+                db.commit()
+                
+                return {
+                    "success": True,
+                    "message": f"Product reference table uploaded successfully",
+                    "records_added": records_added,
+                    "records_updated": records_updated,
+                    "total_records": records_added + records_updated
+                }
+            except Exception as e:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+                
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_file_path):
+                os.remove(tmp_file_path)
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading product reference: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error uploading product reference: {str(e)}")
+
+# Product Data Management API endpoints
+@app.get("/api/v1/products")
+async def get_products(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user)
+):
+    """Get all products with pagination"""
+    try:
+        from app.database import get_db, ProductReference
+        db = next(get_db())
+        
+        # Get total count
+        total = db.query(ProductReference).count()
+        
+        # Get paginated data
+        products = db.query(ProductReference).offset(skip).limit(limit).all()
+        
+        result = []
+        for product in products:
+            result.append({
+                "id": product.id,
+                "product_name": product.product_name,
+                "product_id": product.product_id,
+                "product_price": float(product.product_price) if product.product_price else None,
+                "created_at": product.created_at.isoformat() if product.created_at else None
+            })
+        
+        return {
+            "data": result,
+            "total": total,
+            "skip": skip,
+            "limit": limit
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting products: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/api/v1/products/all")
+async def get_all_products(current_user: User = Depends(get_current_user)):
+    """Get all products (for search/filtering)"""
+    try:
+        from app.database import get_db, ProductReference
+        db = next(get_db())
+        
+        products = db.query(ProductReference).all()
+        
+        result = []
+        for product in products:
+            result.append({
+                "id": product.id,
+                "product_name": product.product_name,
+                "product_id": product.product_id,
+                "product_price": float(product.product_price) if product.product_price else None,
+                "created_at": product.created_at.isoformat() if product.created_at else None
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting all products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting all products: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/api/v1/products")
+async def create_product(
+    product_data: Dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new product record"""
+    try:
+        from app.database import get_db, ProductReference
+        from sqlalchemy import func
+        db = next(get_db())
+        
+        # Validate required fields
+        if not product_data.get("product_name"):
+            raise HTTPException(status_code=400, detail="product_name is required")
+        
+        # Get next product_id if not provided
+        product_id = product_data.get("product_id")
+        if not product_id:
+            max_id = db.query(func.max(ProductReference.product_id)).scalar()
+            product_id = (max_id or 0) + 1
+        
+        # Check if product_name already exists
+        existing = db.query(ProductReference).filter(
+            ProductReference.product_name == product_data.get("product_name")
+        ).first()
+        
+        if existing:
+            raise HTTPException(status_code=400, detail="Product name already exists")
+        
+        # Create new product record
+        new_product = ProductReference(
+            product_name=product_data.get("product_name"),
+            product_id=product_id,
+            product_price=product_data.get("product_price", 0.0)
+        )
+        
+        db.add(new_product)
+        db.commit()
+        db.refresh(new_product)
+        
+        return {
+            "id": new_product.id,
+            "product_name": new_product.product_name,
+            "product_id": new_product.product_id,
+            "product_price": float(new_product.product_price) if new_product.product_price else None,
+            "created_at": new_product.created_at.isoformat() if new_product.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating product: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating product: {str(e)}")
+    finally:
+        db.close()
+
+@app.put("/api/v1/products/{product_id}")
+async def update_product(
+    product_id: int,
+    update_data: Dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Update a product record"""
+    try:
+        from app.database import get_db, ProductReference
+        db = next(get_db())
+        
+        # Get the record
+        product = db.query(ProductReference).filter(ProductReference.id == product_id).first()
+        
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        # Update fields
+        if "product_name" in update_data:
+            # Check if new name already exists (excluding current record)
+            existing = db.query(ProductReference).filter(
+                ProductReference.product_name == update_data["product_name"],
+                ProductReference.id != product_id
+            ).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Product name already exists")
+            product.product_name = update_data["product_name"]
+        if "product_id" in update_data:
+            product.product_id = update_data["product_id"]
+        if "product_price" in update_data:
+            product.product_price = update_data["product_price"]
+        
+        db.commit()
+        db.refresh(product)
+        
+        return {
+            "id": product.id,
+            "product_name": product.product_name,
+            "product_id": product.product_id,
+            "product_price": float(product.product_price) if product.product_price else None,
+            "created_at": product.created_at.isoformat() if product.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating product: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating product: {str(e)}")
+    finally:
+        db.close()
+
+@app.delete("/api/v1/products/{product_id}")
+async def delete_product(
+    product_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a product record"""
+    try:
+        from app.database import get_db, ProductReference
+        db = next(get_db())
+        
+        # Get the record
+        product = db.query(ProductReference).filter(ProductReference.id == product_id).first()
+        
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        db.delete(product)
+        db.commit()
+        
+        return {"message": "Product deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting product: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting product: {str(e)}")
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     import uvicorn

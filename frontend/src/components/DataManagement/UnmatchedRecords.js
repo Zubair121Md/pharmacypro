@@ -26,6 +26,7 @@ import {
   CircularProgress,
   IconButton,
   Tooltip,
+  Autocomplete,
 } from '@mui/material';
 import {
   Refresh,
@@ -40,15 +41,18 @@ function UnmatchedRecords() {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
   const [openDialog, setOpenDialog] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [mappingData, setMappingData] = useState({
-    pharmacy_id: '',
+    master_pharmacy_id: '',
     notes: '',
   });
   const [filter, setFilter] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [masterPharmacies, setMasterPharmacies] = useState([]);
+  const [pharmacySearchQuery, setPharmacySearchQuery] = useState('');
+  const [filteredPharmacies, setFilteredPharmacies] = useState([]);
 
   useEffect(() => {
     fetchUnmatchedRecords();
@@ -98,21 +102,38 @@ function UnmatchedRecords() {
     }
   };
 
-  const fetchMasterPharmacies = async () => {
+  const fetchMasterPharmacies = async (query = '') => {
     try {
-      const response = await unmatchedAPI.getMasterPharmacies();
+      const response = await unmatchedAPI.getMasterPharmacies(query);
       setMasterPharmacies(response.data);
+      setFilteredPharmacies(response.data);
     } catch (error) {
       console.error('Failed to fetch master pharmacies:', error);
     }
   };
 
+  useEffect(() => {
+    if (openDialog) {
+      // Filter pharmacies based on search query
+      if (pharmacySearchQuery.trim() === '') {
+        setFilteredPharmacies(masterPharmacies);
+      } else {
+        const filtered = masterPharmacies.filter(pharmacy =>
+          (pharmacy.pharmacy_name || '').toLowerCase().includes(pharmacySearchQuery.toLowerCase()) ||
+          (pharmacy.pharmacy_id || '').toLowerCase().includes(pharmacySearchQuery.toLowerCase())
+        );
+        setFilteredPharmacies(filtered);
+      }
+    }
+  }, [pharmacySearchQuery, masterPharmacies, openDialog]);
+
   const handleMapRecord = (record) => {
     setSelectedRecord(record);
     setMappingData({
-      pharmacy_id: '',
+      master_pharmacy_id: '',
       notes: '',
     });
+    setPharmacySearchQuery('');
     fetchMasterPharmacies();
     setOpenDialog(true);
   };
@@ -129,12 +150,21 @@ function UnmatchedRecords() {
   };
 
   const handleMappingSubmit = async () => {
+    if (!mappingData.master_pharmacy_id) {
+      setError('Please select a master pharmacy');
+      return;
+    }
+    
     try {
-      await unmatchedAPI.mapRecord(selectedRecord.id, mappingData);
+      setError(null);
+      await unmatchedAPI.mapRecord(selectedRecord.id, mappingData.master_pharmacy_id);
       setOpenDialog(false);
       fetchUnmatchedRecords();
+      setSuccess('Record mapped successfully!');
+      setTimeout(() => setSuccess(null), 3000);
     } catch (error) {
-      setError('Failed to map record');
+      setError(error.response?.data?.detail || 'Failed to map record');
+      console.error('Mapping error:', error);
     }
   };
 
@@ -142,9 +172,11 @@ function UnmatchedRecords() {
     setOpenDialog(false);
     setSelectedRecord(null);
     setMappingData({
-      pharmacy_id: '',
+      master_pharmacy_id: '',
       notes: '',
     });
+    setPharmacySearchQuery('');
+    setError(null);
   };
 
   const filteredRecords = records.filter(record => {
@@ -196,6 +228,12 @@ function UnmatchedRecords() {
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
+        </Alert>
+      )}
+
+      {success && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess(null)}>
+          {success}
         </Alert>
       )}
 
@@ -305,6 +343,11 @@ function UnmatchedRecords() {
           Map Pharmacy Record
         </DialogTitle>
         <DialogContent>
+          {error && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
           {selectedRecord && (
             <Box>
               <Typography variant="body2" color="text.secondary" gutterBottom>
@@ -314,23 +357,37 @@ function UnmatchedRecords() {
                 Generated ID: <strong>{selectedRecord.generated_id}</strong>
               </Typography>
               
-              <FormControl fullWidth sx={{ mt: 2 }}>
-                <InputLabel>Select Master Pharmacy</InputLabel>
-                <Select
-                  value={mappingData.pharmacy_id}
-                  label="Select Master Pharmacy"
-                  onChange={(e) => setMappingData({
+              <Autocomplete
+                fullWidth
+                sx={{ mt: 2 }}
+                options={filteredPharmacies}
+                getOptionLabel={(option) => `${option.pharmacy_name} (${option.pharmacy_id})`}
+                value={masterPharmacies.find(p => p.pharmacy_id === mappingData.master_pharmacy_id) || null}
+                onChange={(event, newValue) => {
+                  setMappingData({
                     ...mappingData,
-                    pharmacy_id: e.target.value,
-                  })}
-                >
-                  {masterPharmacies.map((pharmacy) => (
-                    <MenuItem key={pharmacy.pharmacy_id} value={pharmacy.pharmacy_id}>
-                      {pharmacy.pharmacy_name} ({pharmacy.pharmacy_id})
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+                    master_pharmacy_id: newValue ? newValue.pharmacy_id : '',
+                  });
+                }}
+                onInputChange={(event, newInputValue) => {
+                  setPharmacySearchQuery(newInputValue);
+                }}
+                inputValue={pharmacySearchQuery}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Search Master Pharmacy"
+                    placeholder="Type to search pharmacy name or ID..."
+                    variant="outlined"
+                  />
+                )}
+                noOptionsText="No pharmacies found"
+                loading={masterPharmacies.length === 0}
+                filterOptions={(options, state) => {
+                  // Custom filter - already filtered by useEffect
+                  return options;
+                }}
+              />
               
               <TextField
                 fullWidth

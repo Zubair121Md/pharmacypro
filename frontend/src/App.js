@@ -11,10 +11,13 @@ import Analytics from './components/Analytics/Analytics';
 import AdminPanel from './components/Admin/AdminPanel';
 import Settings from './components/Settings/Settings';
 import UnmatchedRecords from './components/DataManagement/UnmatchedRecords';
+import NewlyMapped from './components/DataManagement/NewlyMapped';
 import RecentUploads from './components/RecentUploads/RecentUploads';
 import IncompleteRecords from './components/DataManagement/IncompleteRecords';
 import DataManagement from './components/DataManagement/DataManagement';
 import MasterIdGenerator from './components/MasterIdGenerator/MasterIdGenerator';
+import MasterDataManagement from './components/MasterDataManagement/MasterDataManagement';
+import SplitRatioManagement from './components/SplitRatioManagement/SplitRatioManagement';
 import PharmacyGenerator from './components/MasterIdGenerator/PharmacyGenerator';
 import ProductGenerator from './components/MasterIdGenerator/ProductGenerator';
 import DoctorGenerator from './components/MasterIdGenerator/DoctorGenerator';
@@ -64,6 +67,8 @@ function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="upload" element={<FileUpload />} />
+          <Route path="master-data" element={<MasterDataManagement />} />
+          <Route path="split-ratios" element={<SplitRatioManagement />} />
           <Route path="analytics" element={<Analytics />} />
           <Route
             path="admin"
@@ -76,6 +81,7 @@ function App() {
           <Route path="settings" element={<Settings />} />
           <Route path="data-management" element={<DataManagement />} />
           <Route path="unmatched" element={<UnmatchedRecords />} />
+          <Route path="newly-mapped" element={<NewlyMapped />} />
           <Route path="incomplete" element={<IncompleteRecords />} />
           <Route path="recent-uploads" element={<RecentUploads />} />
           <Route path="generator" element={<MasterIdGenerator />} />

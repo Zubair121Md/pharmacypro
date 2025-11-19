@@ -18,49 +18,45 @@ import {
   CardContent,
   IconButton,
   Tooltip,
+  CircularProgress,
 } from '@mui/material';
 import {
   Person as DoctorIcon,
   ContentCopy as CopyIcon,
   Add as AddIcon,
 } from '@mui/icons-material';
+import { generatorAPI } from '../../services/api';
 
 const DoctorGenerator = () => {
   const [doctorInput, setDoctorInput] = useState('');
   const [generatedIds, setGeneratedIds] = useState([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const normalizeText = (text) => {
-    if (!text) return '';
-    return text
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '')
-      .substring(0, 8)
-      .padEnd(8, '-');
-  };
-
-  const generateId = (text) => {
-    const normalized = normalizeText(text);
-    return `DR-${normalized}`;
-  };
-
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!doctorInput.trim()) {
       setError('Please enter a doctor name to generate ID');
       return;
     }
 
-    const generatedId = generateId(doctorInput);
-    const newEntry = {
-      id: Date.now(),
-      originalName: doctorInput,
-      generatedId,
-      timestamp: new Date().toLocaleString(),
-    };
-
-    setGeneratedIds(prev => [newEntry, ...prev]);
+    setLoading(true);
     setError('');
-    setDoctorInput('');
+    try {
+      const response = await generatorAPI.generateId(doctorInput.trim(), 'doctor');
+      const newEntry = {
+        id: Date.now(),
+        originalName: doctorInput,
+        generatedId: response.data.generated_id,
+        timestamp: new Date().toLocaleString(),
+      };
+
+      setGeneratedIds(prev => [newEntry, ...prev]);
+      setDoctorInput('');
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to generate doctor ID');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const copyToClipboard = (text) => {
@@ -78,8 +74,14 @@ const DoctorGenerator = () => {
         Doctor ID Generator
       </Typography>
       <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-        Generate standardized doctor IDs with DR- prefix
+        Generate doctor IDs with format: XXX-YYY-NNN (counter-based unique IDs)
       </Typography>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
 
       <Grid container spacing={3}>
         <Grid item xs={12} md={6}>
@@ -105,10 +107,10 @@ const DoctorGenerator = () => {
                 variant="contained"
                 onClick={handleGenerate}
                 fullWidth
-                startIcon={<AddIcon />}
-                disabled={!doctorInput.trim()}
+                startIcon={loading ? <CircularProgress size={20} /> : <AddIcon />}
+                disabled={!doctorInput.trim() || loading}
               >
-                Generate Doctor ID
+                {loading ? 'Generating...' : 'Generate Doctor ID'}
               </Button>
             </CardContent>
           </Card>
@@ -124,13 +126,13 @@ const DoctorGenerator = () => {
                   <Typography variant="body2" color="text.secondary">
                     Input: {doctorInput}
                   </Typography>
-                  <Typography variant="h6" sx={{ mt: 1, fontFamily: 'monospace' }}>
-                    Generated: {generateId(doctorInput)}
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    Click "Generate Doctor ID" to create unique ID
                   </Typography>
                 </Box>
               ) : (
                 <Typography variant="body2" color="text.secondary">
-                  Enter a doctor name to see the generated ID
+                  Enter a doctor name to generate ID
                 </Typography>
               )}
             </CardContent>

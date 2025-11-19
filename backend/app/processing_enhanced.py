@@ -196,11 +196,8 @@ class DataProcessor:
             # Rename columns to standard names
             chunk_renamed = chunk.rename(columns={k: v for v, k in column_mapping.items()})
             
-            # Split 'Pharmacy Name' into 'Facility Name' and 'Location'
-            chunk_renamed[['Facility Name', 'Location']] = chunk_renamed['pharmacy_name'].str.split(',', n=1, expand=True)
-            chunk_renamed['Location'] = chunk_renamed['Location'].fillna('Not Specified').str.strip()
-            
-            # Generate IDs
+            # No longer splitting - use full pharmacy name for both facility and location
+            # Generate IDs using full name for both parts
             id_counter = {}
             chunk_renamed['Generated_Pharmacy_ID'] = ''
             
@@ -208,15 +205,15 @@ class DataProcessor:
                 if index % 100 == 0:
                     logger.info(f"Processing row {index} in chunk")
                 
-                facility_name = row['Facility Name']
-                location = row['Location']
+                full_name = row['pharmacy_name']  # Use full name for both parts
                 
-                if pd.isna(facility_name) or not str(facility_name).strip():
+                if pd.isna(full_name) or not str(full_name).strip():
                     chunk_renamed.at[index, 'Generated_Pharmacy_ID'] = 'INVALID'
-                    logger.warning(f"Row {index + 2}: Invalid facility name: {row['pharmacy_name']}")
+                    logger.warning(f"Row {index + 2}: Invalid pharmacy name: {row['pharmacy_name']}")
                 else:
+                    # Pass full name for both facility and location
                     chunk_renamed.at[index, 'Generated_Pharmacy_ID'] = generate_id(
-                        facility_name, location, index, id_counter
+                        full_name, full_name, index, id_counter
                     )
             
             # Enhanced matching

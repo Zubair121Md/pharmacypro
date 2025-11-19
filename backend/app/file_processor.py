@@ -13,12 +13,13 @@ class FileProcessor:
     def __init__(self):
         self.id_counter = {}
         
-    def generate_id(self, facility_name: str, location: str, row_index: int) -> str:
+    def generate_id(self, pharmacy_name: str, row_index: int) -> str:
         """
         Generate ID using the same logic as tasks_enhanced.py
+        Uses full pharmacy name for both facility and location parts
         """
         from app.tasks_enhanced import generate_id
-        return generate_id(facility_name, location, row_index, {})
+        return generate_id(pharmacy_name, pharmacy_name, row_index, {})
     
     def validate_invoice_columns(self, df: pd.DataFrame) -> Tuple[bool, List[str]]:
         """
@@ -85,17 +86,10 @@ class FileProcessor:
                     quantity = float(row['Quantity']) if pd.notna(row['Quantity']) else 0
                     amount = float(row['Amount']) if pd.notna(row['Amount']) else 0
                     
-                    # Split pharmacy name to extract location
-                    if ',' in pharmacy_name:
-                        facility_name, location = pharmacy_name.split(',', 1)
-                        location = location.strip()
-                    else:
-                        facility_name = pharmacy_name
-                        location = "Not Specified"
-                    
+                    # Use full pharmacy name for both facility and location (no splitting)
                     # Generate ID using the same logic as tasks_enhanced.py
                     from app.tasks_enhanced import generate_id
-                    generated_id = generate_id(facility_name, location, index, {})
+                    generated_id = generate_id(pharmacy_name, pharmacy_name, index, {})
                     
                     # Store in database
                     if generated_id != 'INVALID':
@@ -111,8 +105,6 @@ class FileProcessor:
                     
                     processed_row = {
                         "original_pharmacy_name": pharmacy_name,
-                        "facility_name": facility_name.strip(),
-                        "location": location,
                         "generated_id": generated_id,
                         "product": product,
                         "quantity": quantity,

@@ -73,36 +73,42 @@ def _calculate_growth_rate(db: Session, current_revenue: float) -> float:
 def normalize_text(text, length, from_end=False):
     """
     Normalize text by:
-    - Removing special characters except spaces and periods
+    - Removing ALL special characters except spaces (including . and ,)
     - Lowercasing
-    - Taking first/last `length` characters
-    - Padding with dashes if shorter
+    - Taking first/last `length` characters (after removing spaces)
+    - Padding with underscores if shorter
     """
     if not text or pd.isna(text):
-        return "-" * length
-    cleaned = re.sub(r'[^\w\s.]', '', str(text)).strip().lower()
+        return "_" * length
+    # Remove ALL special chars (including . and ,)
+    cleaned = re.sub(r'[^\w\s]', '', str(text)).strip().lower()
     if not cleaned:
-        return "-" * length
+        return "_" * length
+    # Remove spaces and slice
+    no_spaces = cleaned.replace(" ", "")
     if from_end:
-        slice_txt = cleaned.replace(" ", "")[-length:]
+        slice_txt = no_spaces[-length:]
     else:
-        slice_txt = cleaned.replace(" ", "")[:length]
-    return slice_txt.upper().ljust(length, "-")
+        slice_txt = no_spaces[:length]
+    return slice_txt.upper().ljust(length, "_")
 
 def generate_id(facility_name: str, location: str, row_index: int, id_counter: Dict[str, str]) -> str:
     """
-    Generate ID exactly as specified: FACILITY(10)-LOCATION(10)
+    Generate ID using full name for both facility and location parts (no splitting).
+    Format: FACILITY(10)-LOCATION(10)
     """
     try:
-        if facility_name is None or (isinstance(facility_name, float) and pd.isna(facility_name)) or not str(facility_name).strip():
-            logger.warning(f"Row {row_index + 2}: Invalid facility name: {facility_name}")
+        # Use full name for both parts (no splitting)
+        full_name = facility_name if facility_name else location
+        if full_name is None or (isinstance(full_name, float) and pd.isna(full_name)) or not str(full_name).strip():
+            logger.warning(f"Row {row_index + 2}: Invalid pharmacy name: {full_name}")
             return "INVALID"
         
-        # Normalize facility and location
-        facility_code = normalize_text(facility_name, 10, from_end=False)
-        location_code = normalize_text(location, 10, from_end=True)
+        # Normalize using full name for both facility and location
+        facility_code = normalize_text(full_name, 10, from_end=False)
+        location_code = normalize_text(full_name, 10, from_end=True)
         
-        # Just return without numbering
+        # Return without numbering
         return f"{facility_code}-{location_code}"
     except Exception as e:
         logger.warning(f"Row {row_index + 2}: ID generation error: {e}")
@@ -198,11 +204,8 @@ def process_pharmacies(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[pd.
         # Rename columns to standard names
         df_renamed = df.rename(columns={k: v for v, k in column_mapping.items()})
         
-        # Split 'Pharmacy Name' into 'Facility Name' and 'Location'
-        df_renamed[['Facility Name', 'Location']] = df_renamed['pharmacy_name'].str.split(',', n=1, expand=True)
-        df_renamed['Location'] = df_renamed['Location'].fillna('Not Specified').str.strip()
-        
-        # Generate IDs
+        # No longer splitting - use full pharmacy name for both facility and location
+        # Generate IDs using full name for both parts
         id_counter = {}
         df_renamed['Generated_Pharmacy_ID'] = ''
         
@@ -210,15 +213,15 @@ def process_pharmacies(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[pd.
             if index % 500 == 0:
                 logger.info(f"Processed {index} rows...")
             
-            facility_name = row['Facility Name']
-            location = row['Location']
+            full_name = row['pharmacy_name']  # Use full name for both parts
             
-            if pd.isna(facility_name) or not str(facility_name).strip():
+            if pd.isna(full_name) or not str(full_name).strip():
                 df_renamed.at[index, 'Generated_Pharmacy_ID'] = 'INVALID'
-                logger.warning(f"Row {index + 2}: Invalid facility name: {row['pharmacy_name']}")
+                logger.warning(f"Row {index + 2}: Invalid pharmacy name: {row['pharmacy_name']}")
             else:
+                # Pass full name for both facility and location
                 df_renamed.at[index, 'Generated_Pharmacy_ID'] = generate_id(
-                    facility_name, location, index, id_counter
+                    full_name, full_name, index, id_counter
                 )
         
         # Match with master data
@@ -235,14 +238,23 @@ def process_pharmacies(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[pd.
 def normalize_product_name(product_name: str) -> str:
     """
     Normalize product name for matching: uppercase, remove punctuation, trim spaces
+    Also removes common quantity/volume suffixes (like 100ML, 10ML, etc.) for better matching
     """
     if not product_name or pd.isna(product_name):
         return ""
-    return re.sub(r'[^\w\s]', '', str(product_name)).strip().upper().replace(' ', '')
+    # Remove special characters
+    normalized = re.sub(r'[^\w\s]', '', str(product_name)).strip().upper()
+    # Remove common quantity/volume suffixes (e.g., "100ML", "10ML", "250MG", etc.)
+    # Pattern: optional space + digits + optional unit (ML, MG, GM, G, etc.)
+    normalized = re.sub(r'\s*\d+\s*(ML|MG|GM|G|KG|L|TAB|TABLET|SYP|SYRUP|EXP|EXPT)\s*$', '', normalized, flags=re.IGNORECASE)
+    # Remove all spaces for exact matching
+    return normalized.replace(' ', '')
 
 def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[int, int]:
     """
     Merge invoice data with master data using STRICT Pharmacy + Product matching
+    Now with fuzzy product name matching via product_id_generator
+    Handles multiple master records with same pharmacy+product combination
     
     Args:
         df: Processed invoice DataFrame
@@ -253,18 +265,48 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
         Tuple of (matched_count, unmatched_count)
     """
     try:
+        from app.product_id_generator import generate_product_id, build_product_reference_mapping
+        
         matched_count = 0
         unmatched_count = 0
         
+        # Build product reference mapping for fuzzy matching
+        product_ref_mapping = build_product_reference_mapping(db)
+        use_product_matching = len(product_ref_mapping) > 0
+        
+        if use_product_matching:
+            logger.info(f"Product reference table loaded with {len(product_ref_mapping)} core products for fuzzy matching")
+        else:
+            logger.warning("Product reference table is empty, falling back to exact string matching")
+        
         # Get all master data and create lookup by pharmacy_id + product
         master_data = db.query(MasterMapping).all()
-        master_lookup = {}
+        master_lookup = {}  # Key: lookup_key, Value: list of master records
+        master_record_map = {record.id: record for record in master_data}  # For quick lookups by ID
         
+        # Create multiple lookups for better matching
+        # 1. By pharmacy_id + normalized product name (exact)
+        # 2. By pharmacy_id + product_id (from reference table)
         for record in master_data:
-            # Create composite key: pharmacy_id + normalized_product
+            # Exact match lookup
             normalized_product = normalize_product_name(record.product_names)
-            key = f"{record.pharmacy_id}|{normalized_product}"
-            master_lookup[key] = record
+            key_exact = f"{record.pharmacy_id}|EXACT|{normalized_product}"
+            if key_exact not in master_lookup:
+                master_lookup[key_exact] = []
+            master_lookup[key_exact].append(record)
+            
+            # If we have product reference, try to match master product to get product_id
+            if use_product_matching:
+                try:
+                    product_id, _, matched_original = generate_product_id(record.product_names, db)
+                    if product_id:
+                        key_fuzzy = f"{record.pharmacy_id}|PID|{product_id}"
+                        if key_fuzzy not in master_lookup:
+                            master_lookup[key_fuzzy] = []
+                        master_lookup[key_fuzzy].append(record)
+                        logger.debug(f"Master product '{record.product_names}' -> Product ID {product_id} (matched: '{matched_original}')")
+                except Exception as e:
+                    logger.debug(f"Could not match master product '{record.product_names}' to reference: {str(e)}")
         
         logger.info(f"Created master lookup with {len(master_lookup)} pharmacy+product combinations")
         
@@ -278,40 +320,207 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
             # Normalize ID for matching (replace - with _)
             normalized_id = generated_id.replace('-', '_')
             
-            # Normalize product name for matching
+            # Try multiple matching strategies
+            master_records = []
+            match_method = None
+            lookup_key_exact = None
+            lookup_key_fuzzy = None
+            
+            # Strategy 1: Exact normalized product name match
             normalized_product = normalize_product_name(row['product'])
+            lookup_key_exact = f"{normalized_id}|EXACT|{normalized_product}"
+            master_records = master_lookup.get(lookup_key_exact, [])
+            if master_records:
+                match_method = "exact"
             
-            # Create composite key for lookup
-            lookup_key = f"{normalized_id}|{normalized_product}"
+            # Strategy 2: Fuzzy match via product reference table
+            if not master_records and use_product_matching:
+                try:
+                    product_id, product_price, matched_original = generate_product_id(row['product'], db)
+                    if product_id:
+                        lookup_key_fuzzy = f"{normalized_id}|PID|{product_id}"
+                        master_records = master_lookup.get(lookup_key_fuzzy, [])
+                        if master_records:
+                            match_method = "fuzzy"
+                            logger.info(f"Fuzzy matched: '{row['product']}' -> '{matched_original}' (ID: {product_id}) for pharmacy {normalized_id}")
+                    else:
+                        logger.warning(f"Could not find product ID for invoice product '{row['product']}' in reference table")
+                except Exception as e:
+                    logger.warning(f"Fuzzy matching failed for '{row['product']}': {str(e)}")
             
-            # Try to find exact match for BOTH pharmacy and product
-            master_record = master_lookup.get(lookup_key)
-            
-            if master_record:
-                # Calculate revenue: Quantity × Master.Product_Price
-                quantity = int(row['quantity']) if pd.notna(row['quantity']) else 0
-                product_price = float(master_record.product_price) if master_record.product_price else 0.0
-                calculated_revenue = quantity * product_price
-                
+            if master_records:
                 # Get pharmacy name from the row (try different column names)
                 pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
+                quantity = int(row['quantity']) if pd.notna(row['quantity']) else 0
                 
-                # Create invoice record with doctor allocation
-                invoice = Invoice(
-                    pharmacy_id=normalized_id,
-                    pharmacy_name=pharmacy_name,
-                    product=row['product'],
-                    quantity=quantity,
-                    amount=calculated_revenue,  # Use calculated revenue, not invoice amount
-                    user_id=user_id
-                )
-                db.add(invoice)
-                matched_count += 1
+                # Check if there's a split rule for this pharmacy+product combination
+                # Try both exact and fuzzy keys to find a split rule
+                from app.database import MasterSplitRule
+                split_rule = None
+                lookup_key_for_split = None
                 
-                logger.info(f"Matched: {pharmacy_name} + {row['product']} -> {master_record.doctor_names} (Revenue: {calculated_revenue})")
+                # First try the lookup key that was used for matching
+                if match_method == "exact" and lookup_key_exact:
+                    lookup_key_for_split = lookup_key_exact
+                    split_rule = db.query(MasterSplitRule).filter_by(
+                        pharmacy_id=normalized_id,
+                        product_key=lookup_key_exact
+                    ).first()
+                elif match_method == "fuzzy" and lookup_key_fuzzy:
+                    lookup_key_for_split = lookup_key_fuzzy
+                    split_rule = db.query(MasterSplitRule).filter_by(
+                        pharmacy_id=normalized_id,
+                        product_key=lookup_key_fuzzy
+                    ).first()
+                
+                # If no split rule found with the matched key, try the other key as fallback
+                if not split_rule:
+                    if lookup_key_exact and match_method != "exact":
+                        split_rule = db.query(MasterSplitRule).filter_by(
+                            pharmacy_id=normalized_id,
+                            product_key=lookup_key_exact
+                        ).first()
+                        if split_rule:
+                            lookup_key_for_split = lookup_key_exact
+                            logger.info(f"Found split rule using EXACT key as fallback for {pharmacy_name} + '{row['product']}'")
+                    elif lookup_key_fuzzy and match_method != "fuzzy":
+                        split_rule = db.query(MasterSplitRule).filter_by(
+                            pharmacy_id=normalized_id,
+                            product_key=lookup_key_fuzzy
+                        ).first()
+                        if split_rule:
+                            lookup_key_for_split = lookup_key_fuzzy
+                            logger.info(f"Found split rule using PID key as fallback for {pharmacy_name} + '{row['product']}'")
+                
+                # If still no split rule found, try to find any split rule for this pharmacy+product
+                # by checking if the product_key contains a matching normalized product
+                if not split_rule and normalized_product:
+                    all_rules = db.query(MasterSplitRule).filter_by(pharmacy_id=normalized_id).all()
+                    for rule in all_rules:
+                        if not rule.product_key:
+                            continue
+                        # Extract normalized product from rule's product_key (format: "pharmacy_id|EXACT|normalized_product" or "pharmacy_id|PID|product_id")
+                        rule_parts = rule.product_key.split("|")
+                        if len(rule_parts) >= 3:
+                            rule_normalized_product = rule_parts[2] if rule_parts[1] == "EXACT" else None
+                            # Check if normalized products match (handles variations like "BRETHNOLSYP" vs "BRETHNOLSYP100ML")
+                            if rule_normalized_product and (rule_normalized_product == normalized_product or 
+                                normalized_product.startswith(rule_normalized_product) or 
+                                rule_normalized_product.startswith(normalized_product)):
+                                # Verify the rule's master records match our master_records
+                                rule_master_ids = {entry.get("master_mapping_id") for entry in rule.rules}
+                                current_master_ids = {rec.id for rec in master_records}
+                                if rule_master_ids.intersection(current_master_ids):
+                                    split_rule = rule
+                                    lookup_key_for_split = rule.product_key
+                                    logger.info(f"Found split rule by product name variation match for {pharmacy_name} + '{row['product']}' (invoice: {normalized_product}, rule: {rule_normalized_product}, key: {rule.product_key})")
+                                    break
+                
+                # Log split rule lookup result
+                if split_rule:
+                    logger.info(f"Found split rule for {pharmacy_name} + '{row['product']}' using key: {lookup_key_for_split}")
+                elif len(master_records) > 1:
+                    logger.warning(f"No split rule found for {pharmacy_name} + '{row['product']}' with {len(master_records)} master records. Tried keys: exact={lookup_key_exact}, fuzzy={lookup_key_fuzzy}")
+                
+                if split_rule and len(master_records) > 1:
+                    # Apply split ratios
+                    total_ratio = sum(entry.get("ratio", 0) for entry in split_rule.rules)
+                    if total_ratio > 0:
+                        # Calculate total revenue - use actual amount if available, otherwise calculate from quantity × price
+                        invoice_amount = row.get('amount', row.get('revenue', row.get('total', None)))
+                        if invoice_amount and pd.notna(invoice_amount):
+                            try:
+                                total_revenue = float(invoice_amount)
+                            except (ValueError, TypeError):
+                                total_revenue = None
+                        else:
+                            total_revenue = None
+                        
+                        # If no invoice amount, calculate from first master record's price
+                        if total_revenue is None:
+                            first_master = master_records[0]
+                            product_price = float(first_master.product_price) if first_master.product_price else 0.0
+                            total_revenue = quantity * product_price
+                        
+                        logger.info(f"Applying split rule for {pharmacy_name} + '{row['product']}': {len(split_rule.rules)} doctors, Qty={quantity}, Total Revenue={total_revenue:.2f}, Total Ratio={total_ratio}%")
+                        
+                        for entry in split_rule.rules:
+                            master_record = master_record_map.get(entry["master_mapping_id"])
+                            if not master_record:
+                                logger.warning(f"Split rule references non-existent master_mapping_id {entry['master_mapping_id']}")
+                                continue
+                            
+                            ratio = entry.get("ratio", 0) / 100.0  # Convert percentage to decimal
+                            allocated_quantity = int(quantity * ratio)
+                            allocated_revenue = total_revenue * ratio
+                            
+                            invoice = Invoice(
+                                pharmacy_id=normalized_id,
+                                pharmacy_name=pharmacy_name,
+                                product=row['product'],
+                                quantity=allocated_quantity,
+                                amount=allocated_revenue,
+                                user_id=user_id,
+                                master_mapping_id=master_record.id  # Link to specific master record (doctor)
+                            )
+                            db.add(invoice)
+                            logger.info(f"Split allocation: {pharmacy_name} + '{row['product']}' -> {master_record.doctor_names} ({entry.get('ratio', 0)}%: Qty={allocated_quantity}, Revenue={allocated_revenue:.2f})")
+                        matched_count += 1
+                    else:
+                        logger.warning(f"Invalid split rule (total_ratio=0) for {pharmacy_name} + '{row['product']}', using first record")
+                        master_record = master_records[0]
+                        product_price = float(master_record.product_price) if master_record.product_price else 0.0
+                        calculated_revenue = quantity * product_price
+                        invoice = Invoice(
+                            pharmacy_id=normalized_id,
+                            pharmacy_name=pharmacy_name,
+                            product=row['product'],
+                            quantity=quantity,
+                            amount=calculated_revenue,
+                            user_id=user_id,
+                            master_mapping_id=master_record.id  # Link to specific master record (doctor)
+                        )
+                        db.add(invoice)
+                        matched_count += 1
+                        logger.info(f"Matched ({match_method}): {pharmacy_name} + '{row['product']}' -> {master_record.doctor_names} (Revenue: {calculated_revenue})")
+                else:
+                    # No split rule or only one master record - use first/only record
+                    master_record = master_records[0]
+                    product_price = float(master_record.product_price) if master_record.product_price else 0.0
+                    calculated_revenue = quantity * product_price
+                    
+                    invoice = Invoice(
+                        pharmacy_id=normalized_id,
+                        pharmacy_name=pharmacy_name,
+                        product=row['product'],
+                        quantity=quantity,
+                        amount=calculated_revenue,
+                        user_id=user_id,
+                        master_mapping_id=master_record.id  # Link to specific master record (doctor)
+                    )
+                    db.add(invoice)
+                    matched_count += 1
+                    
+                    if len(master_records) > 1:
+                        logger.warning(f"Multiple masters ({len(master_records)}) for {pharmacy_name} + '{row['product']}' but no split rule - using first: {master_record.doctor_names}")
+                    else:
+                        logger.info(f"Matched ({match_method}): {pharmacy_name} + '{row['product']}' -> {master_record.doctor_names} (Revenue: {calculated_revenue})")
             else:
                 # Get pharmacy name from the row (try different column names)
                 pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
+                
+                # Log why it didn't match for debugging
+                if use_product_matching:
+                    try:
+                        product_id, _, matched_original = generate_product_id(row['product'], db)
+                        if product_id:
+                            logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' (Product ID: {product_id}, matched to '{matched_original}') - No master record found for pharmacy_id={normalized_id}")
+                        else:
+                            logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' - Product not found in reference table")
+                    except Exception as e:
+                        logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' - Matching failed: {str(e)}")
+                else:
+                    logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' - No product reference table")
                 
                 # No match for this pharmacy+product combination
                 # Store helpful context: product, quantity and invoice amount
@@ -325,8 +534,6 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 )
                 db.add(unmatched)
                 unmatched_count += 1
-                
-                logger.info(f"Unmatched: {pharmacy_name} + {row['product']} (No matching pharmacy+product in master)")
         
         # Commit all changes
         db.commit()
@@ -426,26 +633,55 @@ def create_chart_ready_data(db: Session, user) -> Dict:
         if user.role != 'super_admin' and user.area:
             master_data = [record for record in master_data if record.area == user.area]
         
-        # Create lookup by pharmacy_id + normalized_product
+        # Create lookup by pharmacy_id + normalized_product (store list of master records)
         master_lookup = {}
         for record in master_data:
             normalized_product = normalize_product_name(record.product_names)
             key = f"{record.pharmacy_id}|{normalized_product}"
-            master_lookup[key] = record
+            if key not in master_lookup:
+                master_lookup[key] = []
+            master_lookup[key].append(record)
         
-        # Find matched records using strict pharmacy+product matching
+        # Find matched records using master_mapping_id for direct linking (preferred) or fallback to lookup
         matched_records = []
         for invoice in invoices:
-            # Normalize product name for matching
+            master_record = None
+            
+            # First, try to use master_mapping_id for direct linking (most accurate, especially for split rules)
+            if invoice.master_mapping_id:
+                master_record = next((m for m in master_data if m.id == invoice.master_mapping_id), None)
+                if master_record:
+                    matched_records.append({
+                        'invoice': invoice,
+                        'master': master_record
+                    })
+                    continue
+            
+            # Fallback: Use lookup by pharmacy_id + normalized_product (for old invoices without master_mapping_id)
             normalized_product = normalize_product_name(invoice.product)
-            
-            # Create composite key for lookup
             lookup_key = f"{invoice.pharmacy_id}|{normalized_product}"
+            master_records = master_lookup.get(lookup_key, [])
             
-            # Find matching master record
-            master_record = master_lookup.get(lookup_key)
-            
-            if master_record:
+            if master_records:
+                # If multiple master records, try to find the best match
+                # by checking if the invoice amount/quantity ratio matches any master record's price
+                master_record = master_records[0]
+                
+                if len(master_records) > 1:
+                    invoice_price_per_unit = float(invoice.amount) / invoice.quantity if invoice.quantity > 0 else 0
+                    best_match = None
+                    min_diff = float('inf')
+                    
+                    for mr in master_records:
+                        master_price = float(mr.product_price) if mr.product_price else 0
+                        diff = abs(invoice_price_per_unit - master_price)
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_match = mr
+                    
+                    if best_match:
+                        master_record = best_match
+                
                 matched_records.append({
                     'invoice': invoice,
                     'master': master_record
@@ -463,11 +699,20 @@ def create_chart_ready_data(db: Session, user) -> Dict:
             }
         
         # Calculate total revenue
-        # Revenue = Quantity × Master.Product_Price
+        # Use actual invoice amount if available, otherwise calculate from quantity × price
         def _calc_revenue(rec):
+            invoice = rec['invoice']
+            # Use the actual amount stored in the invoice (from original invoice or mapped record)
+            if invoice.amount:
+                try:
+                    return float(invoice.amount)
+                except Exception:
+                    pass
+            
+            # Fallback: Calculate from quantity × master product price
             quantity = 0
             try:
-                quantity = int(rec['invoice'].quantity or 0)
+                quantity = int(invoice.quantity or 0)
             except Exception:
                 quantity = 0
             price = 0.0

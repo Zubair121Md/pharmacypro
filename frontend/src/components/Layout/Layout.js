@@ -21,6 +21,7 @@ import {
   useMediaQuery,
   Badge,
   Collapse,
+  Button,
 } from '@mui/material';
 import {
   Menu as MenuIcon,
@@ -40,17 +41,26 @@ import {
   Person as DoctorIcon,
   ExpandLess,
   ExpandMore,
+  Storage as MasterDataIcon,
+  CheckCircle as NewlyMappedIcon,
+  Refresh as RefreshIcon,
+  DeleteSweep as DeleteSweepIcon,
+  CallSplit as SplitRatioIcon,
 } from '@mui/icons-material';
 import { useDispatch, useSelector } from 'react-redux';
 import { logout } from '../../store/slices/authSlice';
+import { adminAPI } from '../../services/api';
 
 const drawerWidth = 240;
 
 const menuItems = [
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/dashboard' },
   { text: 'File Upload', icon: <UploadIcon />, path: '/upload' },
+  { text: 'Master Data Management', icon: <MasterDataIcon />, path: '/master-data' },
+  { text: 'Split Ratio Management', icon: <SplitRatioIcon />, path: '/split-ratios' },
   { text: 'Analytics', icon: <AnalyticsIcon />, path: '/analytics' },
   { text: 'Unmatched Records', icon: <UnmatchedIcon />, path: '/unmatched', badge: true },
+  { text: 'Newly Mapped', icon: <NewlyMappedIcon />, path: '/newly-mapped' },
   { text: 'Recent Uploads', icon: <HistoryIcon />, path: '/recent-uploads' },
   { text: 'Incomplete Records', icon: <AssignmentIcon />, path: '/incomplete' }, // Data quality tab
   { text: 'Settings', icon: <SettingsIcon />, path: '/settings' },
@@ -111,6 +121,42 @@ function Layout() {
 
   const handleGeneratorToggle = () => {
     setGeneratorOpen(!generatorOpen);
+  };
+
+  const handleResetSystem = async () => {
+    if (!window.confirm('Are you sure you want to reset the entire system? This will delete all invoices, unmatched records, and recent uploads. Master data, product reference, and split ratios will be preserved. This action cannot be undone.')) {
+      return;
+    }
+    try {
+      const response = await adminAPI.resetSystem();
+      const productCount = response?.data?.product_data_count;
+      const productPreserved = response?.data?.product_data_preserved;
+      const splitRulesCount = response?.data?.split_rules_count;
+      const splitRulesPreserved = response?.data?.split_rules_preserved;
+      
+      const extraMessage = productCount !== undefined
+        ? `Product data ${productPreserved ? 'preserved' : 'status unknown'} (${productCount} records). Split rules ${splitRulesPreserved ? 'preserved' : 'status unknown'} (${splitRulesCount || 0} rules).`
+        : 'Product data and split rules preserved.';
+      alert(`System reset successfully! Master data has been preserved. ${extraMessage}`);
+      window.location.reload();
+    } catch (error) {
+      console.error('Failed to reset system:', error);
+      alert('Failed to reset system. Please try again.');
+    }
+  };
+
+  const handleResetMasterData = async () => {
+    if (!window.confirm('Are you sure you want to reset master data management? This will delete all master data records. This action cannot be undone.')) {
+      return;
+    }
+    try {
+      await adminAPI.resetMasterData();
+      alert('Master data reset successfully!');
+      window.location.reload();
+    } catch (error) {
+      console.error('Failed to reset master data:', error);
+      alert('Failed to reset master data. Please try again.');
+    }
   };
 
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin';
@@ -230,6 +276,30 @@ function Layout() {
           <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
             Pharmacy Revenue Management System
           </Typography>
+          {(user?.role === 'admin' || user?.role === 'super_admin') && (
+            <>
+              <Button
+                variant="outlined"
+                color="warning"
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={handleResetSystem}
+                sx={{ mr: 1, color: 'white', borderColor: 'white', '&:hover': { borderColor: 'white', bgcolor: 'rgba(255,255,255,0.1)' } }}
+              >
+                Reset System
+              </Button>
+              <Button
+                variant="outlined"
+                color="error"
+                size="small"
+                startIcon={<DeleteSweepIcon />}
+                onClick={handleResetMasterData}
+                sx={{ mr: 1, color: 'white', borderColor: 'white', '&:hover': { borderColor: 'white', bgcolor: 'rgba(255,255,255,0.1)' } }}
+              >
+                Reset Master Data
+              </Button>
+            </>
+          )}
           <IconButton
             size="large"
             edge="end"

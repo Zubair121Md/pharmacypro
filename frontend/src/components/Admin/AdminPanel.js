@@ -72,7 +72,6 @@ function AdminPanel() {
     full_name: '',
     role: 'user',
   });
-  const [resetMemoryOpen, setResetMemoryOpen] = useState(false);
   const [clearUploadsOpen, setClearUploadsOpen] = useState(false);
 
   useEffect(() => {
@@ -180,18 +179,6 @@ function AdminPanel() {
     );
   }
 
-  const handleResetMemory = async () => {
-    try {
-      await adminAPI.resetMemory();
-      await dispatch(clearAnalyticsCache());
-      dispatch(resetAnalyticsState());
-      setResetMemoryOpen(false);
-      // Refresh the page to show updated data
-      window.location.reload();
-    } catch (error) {
-      console.error('Failed to reset memory:', error);
-    }
-  };
 
   const handleClearRecentUploads = async () => {
     try {
@@ -223,14 +210,6 @@ function AdminPanel() {
             onClick={() => setClearUploadsOpen(true)}
           >
             Clear Recent Uploads
-          </Button>
-          <Button
-            variant="contained"
-            color="error"
-            startIcon={<Warning />}
-            onClick={() => setResetMemoryOpen(true)}
-          >
-            Reset Memory
           </Button>
         </Box>
       </Box>
@@ -446,27 +425,6 @@ function AdminPanel() {
         </DialogActions>
       </Dialog>
 
-      {/* Reset Memory Confirmation Dialog */}
-      <Dialog open={resetMemoryOpen} onClose={() => setResetMemoryOpen(false)}>
-        <DialogTitle>
-          <Box display="flex" alignItems="center" gap={1}>
-            <Warning color="error" />
-            Reset Memory
-          </Box>
-        </DialogTitle>
-        <DialogContent>
-          <Typography>
-            This will clear all in-memory analytics, overrides, and revenue data. 
-            This action cannot be undone. Are you sure you want to continue?
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setResetMemoryOpen(false)}>Cancel</Button>
-          <Button onClick={handleResetMemory} color="error" variant="contained">
-            Reset Memory
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       {/* Clear Recent Uploads Confirmation Dialog */}
       <Dialog open={clearUploadsOpen} onClose={() => setClearUploadsOpen(false)}>

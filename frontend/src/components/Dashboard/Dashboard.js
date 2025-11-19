@@ -40,12 +40,28 @@ function Dashboard() {
     error,
   } = useSelector((state) => state.analytics);
 
-  useEffect(() => {
+  const refreshAllData = useCallback(() => {
     dispatch(fetchDashboardData());
     dispatch(fetchRevenueByPharmacy());
     dispatch(fetchRevenueByDoctor());
     dispatch(fetchRevenueByRep());
   }, [dispatch]);
+
+  useEffect(() => {
+    refreshAllData();
+    
+    // Listen for analytics data updates (e.g., after split rule changes)
+    const handleAnalyticsUpdate = () => {
+      console.log('Analytics data updated, refreshing dashboard...');
+      refreshAllData();
+    };
+    
+    window.addEventListener('analyticsDataUpdated', handleAnalyticsUpdate);
+    
+    return () => {
+      window.removeEventListener('analyticsDataUpdated', handleAnalyticsUpdate);
+    };
+  }, [refreshAllData]);
 
   const handleRefresh = async () => {
     await dispatch(clearAnalyticsCache());

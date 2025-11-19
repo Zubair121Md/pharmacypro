@@ -6,8 +6,6 @@ import {
   Card,
   CardContent,
   Typography,
-  Tabs,
-  Tab,
   Alert,
   LinearProgress,
   Button,
@@ -16,7 +14,6 @@ import {
   ListItem,
   ListItemText,
   ListItemIcon,
-  IconButton,
   ButtonGroup,
 } from '@mui/material';
 import {
@@ -32,25 +29,9 @@ import {
 import { useDropzone } from 'react-dropzone';
 import {
   uploadInvoice,
-  uploadMaster,
-  uploadEnhanced,
   clearError,
 } from '../../store/slices/uploadSlice';
 import { analyticsAPI } from '../../services/api';
-
-function TabPanel({ children, value, index, ...other }) {
-  return (
-    <div
-      role="tabpanel"
-      hidden={value !== index}
-      id={`upload-tabpanel-${index}`}
-      aria-labelledby={`upload-tab-${index}`}
-      {...other}
-    >
-      {value === index && <Box sx={{ p: 3 }}>{children}</Box>}
-    </div>
-  );
-}
 
 function FileUpload() {
   const dispatch = useDispatch();
@@ -58,15 +39,9 @@ function FileUpload() {
   const { loading, error, progress, currentUpload, uploads } = useSelector(
     (state) => state.upload
   );
-  const [tabValue, setTabValue] = useState(0);
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
-
-  const handleTabChange = (event, newValue) => {
-    setTabValue(newValue);
-    dispatch(clearError());
-  };
 
   const handleAnalyze = async () => {
     setIsAnalyzing(true);
@@ -115,20 +90,8 @@ function FileUpload() {
       const file = acceptedFiles[0];
       setUploadedFiles([...uploadedFiles, file]);
       
-      // Upload based on tab
-      switch (tabValue) {
-        case 0:
-          dispatch(uploadInvoice(file));
-          break;
-        case 1:
-          dispatch(uploadMaster(file));
-          break;
-        case 2:
-          dispatch(uploadEnhanced(file));
-          break;
-        default:
-          break;
-      }
+      // Upload invoice file
+      dispatch(uploadInvoice(file));
     }
   };
 
@@ -147,19 +110,7 @@ function FileUpload() {
   };
 
   const retryUpload = (file) => {
-    switch (tabValue) {
-      case 0:
-        dispatch(uploadInvoice(file));
-        break;
-      case 1:
-        dispatch(uploadMaster(file));
-        break;
-      case 2:
-        dispatch(uploadEnhanced(file));
-        break;
-      default:
-        break;
-    }
+    dispatch(uploadInvoice(file));
   };
 
   return (
@@ -168,191 +119,110 @@ function FileUpload() {
         File Upload
       </Typography>
       <Typography variant="body1" color="text.secondary" gutterBottom>
-        Upload invoice files, master mapping data, or enhanced files for processing.
+        Upload invoice files for processing.
       </Typography>
 
       <Card sx={{ mt: 2 }}>
-        <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Tabs value={tabValue} onChange={handleTabChange}>
-            <Tab label="Invoice Files" />
-            <Tab label="Master Mapping" />
-          </Tabs>
-        </Box>
-
-        <TabPanel value={tabValue} index={0}>
-          <Box>
+        <CardContent>
+          <Typography variant="h6" gutterBottom>
+            Upload Invoice Files
+          </Typography>
+          <Typography variant="body2" color="text.secondary" gutterBottom>
+            Upload Excel files containing invoice data with columns: Pharmacy_Name, Product, Quantity, Amount
+          </Typography>
+          
+          <Card
+            {...getRootProps()}
+            sx={{
+              p: 4,
+              textAlign: 'center',
+              border: '2px dashed',
+              borderColor: isDragActive ? 'primary.main' : 'grey.300',
+              bgcolor: isDragActive ? 'action.hover' : 'background.paper',
+              cursor: 'pointer',
+              '&:hover': {
+                borderColor: 'primary.main',
+                bgcolor: 'action.hover',
+              },
+            }}
+          >
+            <input {...getInputProps()} />
+            <CloudUpload sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
             <Typography variant="h6" gutterBottom>
-              Upload Invoice Files
+              {isDragActive
+                ? 'Drop the file here...'
+                : 'Drag & drop an Excel file here, or click to select'}
             </Typography>
-            <Typography variant="body2" color="text.secondary" gutterBottom>
-              Upload Excel files containing invoice data with columns: Pharmacy_Name, Product, Quantity, Amount
+            <Typography variant="body2" color="text.secondary">
+              Supports .xlsx and .xls files
             </Typography>
-            
-            <Card
-              {...getRootProps()}
-              sx={{
-                p: 4,
-                textAlign: 'center',
-                border: '2px dashed',
-                borderColor: isDragActive ? 'primary.main' : 'grey.300',
-                bgcolor: isDragActive ? 'action.hover' : 'background.paper',
-                cursor: 'pointer',
-                '&:hover': {
-                  borderColor: 'primary.main',
-                  bgcolor: 'action.hover',
-                },
-              }}
-            >
-              <input {...getInputProps()} />
-              <CloudUpload sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
+          </Card>
+
+          {error && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {typeof error === 'string' ? error : JSON.stringify(error)}
+            </Alert>
+          )}
+
+          {loading && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="body2" gutterBottom>
+                Uploading... {progress}%
+              </Typography>
+              <LinearProgress variant="determinate" value={progress} />
+            </Box>
+          )}
+
+          {currentUpload && (
+            <Alert severity="success" sx={{ mt: 2 }}>
               <Typography variant="h6" gutterBottom>
-                {isDragActive
-                  ? 'Drop the file here...'
-                  : 'Drag & drop an Excel file here, or click to select'}
+                File uploaded successfully!
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Supports .xlsx and .xls files
+              <Typography variant="body2" gutterBottom>
+                Processed {currentUpload.processed_rows} rows
               </Typography>
-            </Card>
-
-            {error && (
-              <Alert severity="error" sx={{ mt: 2 }}>
-                {typeof error === 'string' ? error : JSON.stringify(error)}
-              </Alert>
-            )}
-
-            {loading && (
+              {currentUpload.summary && (
+                <Box sx={{ mt: 1 }}>
+                  <Typography variant="body2">
+                    • Valid rows: {currentUpload.summary.valid_rows}
+                  </Typography>
+                  <Typography variant="body2">
+                    • Invalid rows: {currentUpload.summary.invalid_rows}
+                  </Typography>
+                  <Typography variant="body2">
+                    • Unique pharmacies: {currentUpload.summary.unique_pharmacies}
+                  </Typography>
+                </Box>
+              )}
+              {currentUpload.unmatched_pharmacies && currentUpload.unmatched_pharmacies.length > 0 && (
+                <Box sx={{ mt: 1 }}>
+                  <Typography variant="body2" color="warning.main">
+                    • Unmatched pharmacies: {currentUpload.unmatched_pharmacies.length}
+                  </Typography>
+                </Box>
+              )}
               <Box sx={{ mt: 2 }}>
                 <Typography variant="body2" gutterBottom>
-                  Uploading... {progress}%
+                  Export processed invoice data:
                 </Typography>
-                <LinearProgress variant="determinate" value={progress} />
+                <ButtonGroup variant="outlined" size="small">
+                  <Button
+                    startIcon={<Download />}
+                    onClick={() => handleExportData('csv')}
+                  >
+                    Export CSV
+                  </Button>
+                  <Button
+                    startIcon={<Download />}
+                    onClick={() => handleExportData('xlsx')}
+                  >
+                    Export Excel
+                  </Button>
+                </ButtonGroup>
               </Box>
-            )}
-
-            {currentUpload && (
-              <Alert severity="success" sx={{ mt: 2 }}>
-                <Typography variant="h6" gutterBottom>
-                  File uploaded successfully!
-                </Typography>
-                <Typography variant="body2" gutterBottom>
-                  Processed {currentUpload.processed_rows} rows
-                </Typography>
-                {currentUpload.summary && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="body2">
-                      • Valid rows: {currentUpload.summary.valid_rows}
-                    </Typography>
-                    <Typography variant="body2">
-                      • Invalid rows: {currentUpload.summary.invalid_rows}
-                    </Typography>
-                    <Typography variant="body2">
-                      • Unique pharmacies: {currentUpload.summary.unique_pharmacies}
-                    </Typography>
-                  </Box>
-                )}
-                {currentUpload.unmatched_pharmacies && currentUpload.unmatched_pharmacies.length > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="body2" color="warning.main">
-                      • Unmatched pharmacies: {currentUpload.unmatched_pharmacies.length}
-                    </Typography>
-                  </Box>
-                )}
-                <Box sx={{ mt: 2 }}>
-                  <Typography variant="body2" gutterBottom>
-                    Export processed invoice data:
-                  </Typography>
-                  <ButtonGroup variant="outlined" size="small">
-                    <Button
-                      startIcon={<Download />}
-                      onClick={() => handleExportData('csv')}
-                    >
-                      Export CSV
-                    </Button>
-                    <Button
-                      startIcon={<Download />}
-                      onClick={() => handleExportData('xlsx')}
-                    >
-                      Export Excel
-                    </Button>
-                  </ButtonGroup>
-                </Box>
-              </Alert>
-            )}
-          </Box>
-        </TabPanel>
-
-        <TabPanel value={tabValue} index={1}>
-          <Box>
-            <Typography variant="h6" gutterBottom>
-              Upload Master Mapping
-            </Typography>
-            <Typography variant="body2" color="text.secondary" gutterBottom>
-              Upload Excel files containing master data with pharmacy mappings
-            </Typography>
-            
-            <Card
-              {...getRootProps()}
-              sx={{
-                p: 4,
-                textAlign: 'center',
-                border: '2px dashed',
-                borderColor: isDragActive ? 'primary.main' : 'grey.300',
-                bgcolor: isDragActive ? 'action.hover' : 'background.paper',
-                cursor: 'pointer',
-                '&:hover': {
-                  borderColor: 'primary.main',
-                  bgcolor: 'action.hover',
-                },
-              }}
-            >
-              <input {...getInputProps()} />
-              <CloudUpload sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
-              <Typography variant="h6" gutterBottom>
-                {isDragActive
-                  ? 'Drop the master file here...'
-                  : 'Drag & drop a master mapping file here'}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Master data with pharmacy mappings
-              </Typography>
-            </Card>
-
-            {currentUpload && tabValue === 1 && (
-              <Alert severity="success" sx={{ mt: 2 }}>
-                <Typography variant="h6" gutterBottom>
-                  Master file uploaded successfully!
-                </Typography>
-                <Typography variant="body2" gutterBottom>
-                  Processed {currentUpload.processed_rows} rows
-                </Typography>
-                {currentUpload.summary && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="body2">
-                      • Valid rows: {currentUpload.summary.valid_rows}
-                    </Typography>
-                    <Typography variant="body2">
-                      • Error rows: {currentUpload.summary.error_rows}
-                    </Typography>
-                    <Typography variant="body2">
-                      • Unique pharmacies: {currentUpload.summary.unique_pharmacies}
-                    </Typography>
-                    <Typography variant="body2">
-                      • Unique products: {currentUpload.summary.unique_products}
-                    </Typography>
-                  </Box>
-                )}
-                {currentUpload.validation_errors && currentUpload.validation_errors.length > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="body2" color="warning.main">
-                      • Validation errors: {currentUpload.validation_errors.length}
-                    </Typography>
-                  </Box>
-                )}
-              </Alert>
-            )}
-          </Box>
-        </TabPanel>
+            </Alert>
+          )}
+        </CardContent>
       </Card>
 
       {uploads.length > 0 && (
