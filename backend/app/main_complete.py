@@ -279,10 +279,35 @@ def generate_id(name: str, id_type: str, db: Session = None) -> str:
 
 # Authentication functions
 def get_current_user(token: str = Depends(oauth2_scheme)):
-    if token == "demo_token_12345":
-        return User(id=1, username="admin", email="admin@pharmacy.com", full_name="Admin User", role="super_admin")
-    elif token == "demo_token_user_12345":
-        return User(id=2, username="user", email="user@pharmacy.com", full_name="Regular User", role="user")
+    """Very simple demo auth that maps hardcoded tokens to demo users."""
+    demo_users = {
+        "demo_token_12345": User(
+            id=1,
+            username="admin",
+            email="admin@pharmacy.com",
+            full_name="Admin User",
+            role="super_admin",
+        ),
+        "demo_token_manager_12345": User(
+            id=2,
+            username="manager",
+            email="manager@pharmacy.com",
+            full_name="Manager User",
+            role="admin",
+        ),
+        "demo_token_user_12345": User(
+            id=3,
+            username="user",
+            email="user@pharmacy.com",
+            full_name="Regular User",
+            role="user",
+        ),
+    }
+    
+    user = demo_users.get(token)
+    if user:
+        return user
+    
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -2089,7 +2114,9 @@ async def clear_recent_uploads_admin(current_user: User = Depends(get_current_us
 @app.post("/api/v1/admin/reset-system")
 async def reset_system_admin(current_user: User = Depends(get_current_user)):
     """Reset system data - clear all data except master data management and split rules"""
+    logger.info(f"Reset system requested by user: {current_user.username} (role: {current_user.role})")
     if current_user.role not in ['super_admin', 'admin']:
+        logger.warning(f"Reset system denied for user {current_user.username} with role {current_user.role}")
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     
     try:

@@ -16,6 +16,15 @@ api.interceptors.request.use(
     const token = localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+      // Log for debugging (especially useful in Tauri)
+      if (config.url?.includes('reset-system')) {
+        console.log('Reset system request - Token present:', !!token);
+        console.log('Reset system request - Token value:', token.substring(0, 20) + '...');
+        console.log('Reset system request - Full URL:', config.baseURL + config.url);
+        console.log('Reset system request - Headers:', config.headers);
+      }
+    } else {
+      console.warn('No token found in localStorage for request:', config.url);
     }
     return config;
   },

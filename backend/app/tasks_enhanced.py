@@ -237,18 +237,107 @@ def process_pharmacies(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[pd.
 
 def normalize_product_name(product_name: str) -> str:
     """
-    Normalize product name for matching: uppercase, remove punctuation, trim spaces
-    Also removes common quantity/volume suffixes (like 100ML, 10ML, etc.) for better matching
+    Bulletproof product name normalization with misspelling tolerance.
+    Handles variations, typos, and ensures all characters are read properly.
     """
     if not product_name or pd.isna(product_name):
         return ""
-    # Remove special characters
-    normalized = re.sub(r'[^\w\s]', '', str(product_name)).strip().upper()
-    # Remove common quantity/volume suffixes (e.g., "100ML", "10ML", "250MG", etc.)
-    # Pattern: optional space + digits + optional unit (ML, MG, GM, G, etc.)
-    normalized = re.sub(r'\s*\d+\s*(ML|MG|GM|G|KG|L|TAB|TABLET|SYP|SYRUP|EXP|EXPT)\s*$', '', normalized, flags=re.IGNORECASE)
-    # Remove all spaces for exact matching
-    return normalized.replace(' ', '')
+    
+    # Step 1: Convert to uppercase and strip
+    normalized = str(product_name).strip().upper()
+    
+    # Step 2: Remove parentheses content like (6001), (6002)
+    normalized = re.sub(r'\([^)]*\)', '', normalized)
+    
+    # Step 3: Normalize common product type variations
+    # Handle compound tokens like EXPSYRUP before further normalization
+    normalized = re.sub(r'\bEXPSYRUP\b', 'EXP SYRUP', normalized)
+    normalized = re.sub(r'\bEXPSYP\b', 'EXP SYRUP', normalized)
+    normalized = re.sub(r'\bEXPSYR\b', 'EXP SYRUP', normalized)
+    
+    # SYRUP variations
+    normalized = re.sub(r'\bSYRUP\b', 'SYP', normalized)
+    normalized = re.sub(r'\bSYR\b', 'SYP', normalized)
+    normalized = re.sub(r'\bSYRP\b', 'SYP', normalized)  # Common typo
+    # Handle SY100, SY200, etc. as SYP variations (e.g., "BRETHNOL PLUS SY100" → "BRETHNOLPLUSSYP")
+    normalized = re.sub(r'\bSY\s*\d+\b', 'SYP', normalized)
+    # EXP variations
+    normalized = re.sub(r'\bEXPECT\b', 'EXPT', normalized)
+    normalized = re.sub(r'\bEXP\b', 'EXPT', normalized)
+    normalized = re.sub(r'\bEXPT\b', 'EXPT', normalized)
+    # TAB variations
+    normalized = re.sub(r'\bTABLET\b', 'TAB', normalized)
+    normalized = re.sub(r'\bTABS\b', 'TAB', normalized)
+    normalized = re.sub(r'\bTABL\b', 'TAB', normalized)  # Common typo
+    # SUSP variations
+    normalized = re.sub(r'\bSUSPENSION\b', 'SUSP', normalized)
+    # CAP variations
+    normalized = re.sub(r'\bCAPSULES\b', 'CAP', normalized)
+    normalized = re.sub(r'\bCAPSULE\b', 'CAP', normalized)
+    normalized = re.sub(r'\bCAPS\b', 'CAP', normalized)
+    
+    # Step 4: Remove packaging/quantity information
+    # Remove: 10'S, 10`S, 10'S, etc.
+    normalized = re.sub(r'\s*\d+\s*[`\']\s*S\s*', ' ', normalized, flags=re.IGNORECASE)
+    # Remove: 10X10, 20X10, 25X10, etc. (X can be x, X, or ×)
+    normalized = re.sub(r'\s*\d+\s*[Xx×]\s*\d+\s*', ' ', normalized)
+    # Remove: 10STR/BX, (10STR/BX), etc.
+    normalized = re.sub(r'\s*\(?\s*\d+\s*STR\s*/\s*BX\s*\)?\s*', ' ', normalized, flags=re.IGNORECASE)
+    
+    # Step 5: Remove volume/quantity suffixes at the end
+    # Handle: 100ML, 10ML, 60ML, 200ML, 100 ML, etc.
+    normalized = re.sub(r'\s*\d+\s*(ML|MG|GM|G|KG|L)\s*$', '', normalized, flags=re.IGNORECASE)
+    
+    # Step 6: Normalize special characters and spacing
+    # Replace dashes, dots, underscores with spaces
+    normalized = re.sub(r'[-._]', ' ', normalized)
+    # Remove multiple consecutive spaces
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    
+    # Step 7: Handle common product name variations
+    # BRETHNOL variations
+    normalized = re.sub(r'\bBRETHNOL\s+PLUS\b', 'BRETHNOLPLUS', normalized)
+    normalized = re.sub(r'\bBRETHNOL\s+SYRUP\b', 'BRETHNOLSYP', normalized)
+    normalized = re.sub(r'\bBRETHNOL\s+SYP\b', 'BRETHNOLSYP', normalized)
+    normalized = re.sub(r'\bBRETHNOL\s+EXP\b', 'BRETHNOLEXPT', normalized)
+    normalized = re.sub(r'\bBRETHNOL\s+EXPT\b', 'BRETHNOLEXPT', normalized)
+    
+    # FLOK variations
+    normalized = re.sub(r'\bFLOK\s*-\s*(\d+)\b', r'FLOK\1', normalized)
+    normalized = re.sub(r'\bFLOK\s+(\d+)\b', r'FLOK\1', normalized)
+    
+    # ENMOX variations
+    normalized = re.sub(r'\bENMOX\s+CV\b', 'ENMOXCV', normalized)
+    normalized = re.sub(r'\bENMOX\s+(\d+)\b', r'ENMOX\1', normalized)
+    
+    # ENDOL variations
+    normalized = re.sub(r'\bENDOL\s*-\s*(\d+)\b', r'ENDOL\1', normalized)
+    normalized = re.sub(r'\bENDOL\s+(\d+)\b', r'ENDOL\1', normalized)
+    normalized = re.sub(r'\bENDOL\s*-\s*T\b', 'ENDOLT', normalized)
+    
+    # Q-RIT variations
+    normalized = re.sub(r'\bQ\s*-\s*RIT\b', 'QRIT', normalized)
+    normalized = re.sub(r'\bQ\s+RIT\b', 'QRIT', normalized)
+    
+    # MESTIL variations
+    normalized = re.sub(r'\bMESTIL\s+MD\b', 'MESTILMD', normalized)
+    
+    # Step 8: Remove all remaining special characters
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    
+    # Step 9: Glue numbers to adjacent words (FLOK 20 → FLOK20)
+    normalized = re.sub(r'\s*(\d+)\s*', r'\1', normalized)
+    
+    # Step 10: Strip trailing product type suffixes to align with canonical names
+    suffixes = ['TAB', 'SYP', 'EXPT', 'EXP', 'SUSP', 'CAP', 'GEL', 'DROPS', 'DROP', 'SPRAY']
+    for suffix in suffixes:
+        normalized = re.sub(rf'\s*{suffix}\s*$', '', normalized)
+        normalized = re.sub(rf'{suffix}$', '', normalized)
+    
+    # Step 11: Remove all spaces for final matching
+    normalized = normalized.replace(' ', '')
+    
+    return normalized
 
 def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[int, int]:
     """
@@ -298,7 +387,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
             # If we have product reference, try to match master product to get product_id
             if use_product_matching:
                 try:
-                    product_id, _, matched_original = generate_product_id(record.product_names, db)
+                    product_id, _, matched_original = generate_product_id(record.product_names, db, product_ref_mapping)
                     if product_id:
                         key_fuzzy = f"{record.pharmacy_id}|PID|{product_id}"
                         if key_fuzzy not in master_lookup:
@@ -336,15 +425,15 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
             # Strategy 2: Fuzzy match via product reference table
             if not master_records and use_product_matching:
                 try:
-                    product_id, product_price, matched_original = generate_product_id(row['product'], db)
+                    product_id, product_price, matched_original = generate_product_id(row['product'], db, product_ref_mapping)
                     if product_id:
                         lookup_key_fuzzy = f"{normalized_id}|PID|{product_id}"
                         master_records = master_lookup.get(lookup_key_fuzzy, [])
                         if master_records:
                             match_method = "fuzzy"
-                            logger.info(f"Fuzzy matched: '{row['product']}' -> '{matched_original}' (ID: {product_id}) for pharmacy {normalized_id}")
+                            logger.debug(f"Fuzzy matched: '{row['product']}' -> '{matched_original}' (ID: {product_id}) for pharmacy {normalized_id}")
                     else:
-                        logger.warning(f"Could not find product ID for invoice product '{row['product']}' in reference table")
+                        logger.debug(f"Could not find product ID for invoice product '{row['product']}' in reference table")
                 except Exception as e:
                     logger.warning(f"Fuzzy matching failed for '{row['product']}': {str(e)}")
             
@@ -512,7 +601,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 # Log why it didn't match for debugging
                 if use_product_matching:
                     try:
-                        product_id, _, matched_original = generate_product_id(row['product'], db)
+                        product_id, _, matched_original = generate_product_id(row['product'], db, product_ref_mapping)
                         if product_id:
                             logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' (Product ID: {product_id}, matched to '{matched_original}') - No master record found for pharmacy_id={normalized_id}")
                         else:

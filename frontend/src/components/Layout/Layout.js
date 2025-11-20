@@ -77,10 +77,11 @@ function Layout() {
   const [anchorEl, setAnchorEl] = useState(null);
   const [unmatchedCount, setUnmatchedCount] = useState(0);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [resettingSystem, setResettingSystem] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const dispatch = useDispatch();
-  const { user } = useSelector((state) => state.auth);
+  const { user, token: reduxToken } = useSelector((state) => state.auth);
 
   useEffect(() => {
     const fetchUnmatchedCount = async () => {
@@ -127,8 +128,43 @@ function Layout() {
     if (!window.confirm('Are you sure you want to reset the entire system? This will delete all invoices, unmatched records, and recent uploads. Master data, product reference, and split ratios will be preserved. This action cannot be undone.')) {
       return;
     }
+    
+    setResettingSystem(true);
     try {
+      console.log('Attempting to reset system...');
+      console.log('Current user:', user);
+      console.log('User role:', user?.role);
+      const localStorageToken = localStorage.getItem('token');
+      const token = localStorageToken || reduxToken;
+      console.log('Token from localStorage:', localStorageToken ? `${localStorageToken.substring(0, 20)}...` : 'NO TOKEN');
+      console.log('Token from Redux:', reduxToken ? `${reduxToken.substring(0, 20)}...` : 'NO TOKEN');
+      console.log('Using token:', token ? `${token.substring(0, 20)}...` : 'NO TOKEN');
+      console.log('API Base URL:', process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000');
+      
+      if (!token) {
+        alert('No authentication token found. Please log in again.');
+        setResettingSystem(false);
+        return;
+      }
+      
+      // Test API connection first
+      try {
+        const testResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000'}/health`, {
+          method: 'GET',
+        });
+        console.log('Health check response:', testResponse.status);
+      } catch (testError) {
+        console.error('Health check failed:', testError);
+        alert('Cannot connect to backend server. Please ensure the backend is running on port 8000.');
+        setResettingSystem(false);
+        return;
+      }
+      
       const response = await adminAPI.resetSystem();
+      console.log('Reset system response:', response);
+      console.log('Response status:', response?.status);
+      console.log('Response data:', response?.data);
+      
       const productCount = response?.data?.product_data_count;
       const productPreserved = response?.data?.product_data_preserved;
       const splitRulesCount = response?.data?.split_rules_count;
@@ -137,11 +173,50 @@ function Layout() {
       const extraMessage = productCount !== undefined
         ? `Product data ${productPreserved ? 'preserved' : 'status unknown'} (${productCount} records). Split rules ${splitRulesPreserved ? 'preserved' : 'status unknown'} (${splitRulesCount || 0} rules).`
         : 'Product data and split rules preserved.';
-      alert(`System reset successfully! Master data has been preserved. ${extraMessage}`);
-      window.location.reload();
+      
+      // Use both alert and console for Tauri compatibility
+      const successMsg = `System reset successfully! Master data has been preserved. ${extraMessage}`;
+      alert(successMsg);
+      console.log('SUCCESS:', successMsg);
+      
+      // Small delay before reload to ensure message is seen
+      setTimeout(() => {
+        window.location.reload();
+      }, 500);
     } catch (error) {
       console.error('Failed to reset system:', error);
-      alert('Failed to reset system. Please try again.');
+      console.error('Error type:', error.constructor.name);
+      console.error('Error message:', error.message);
+      console.error('Error response:', error.response);
+      console.error('Error status:', error.response?.status);
+      console.error('Error data:', error.response?.data);
+      console.error('Error config:', error.config);
+      
+      const errorMessage = error.response?.data?.detail || error.message || 'Unknown error occurred';
+      const statusCode = error.response?.status;
+      
+      let userMessage = `Failed to reset system`;
+      if (statusCode === 401) {
+        userMessage = 'Authentication failed. Please log in again. Your session may have expired.';
+      } else if (statusCode === 403) {
+        userMessage = `You do not have permission to reset the system. Admin access required. Current role: ${user?.role || 'unknown'}`;
+      } else if (statusCode === 404) {
+        userMessage = 'Reset endpoint not found. Please check if the backend is running correctly.';
+      } else if (statusCode === 500) {
+        userMessage = `Server error: ${errorMessage}`;
+      } else if (statusCode) {
+        userMessage = `Failed to reset system (Error ${statusCode}): ${errorMessage}`;
+      } else if (error.message?.includes('Network Error') || error.message?.includes('Failed to fetch')) {
+        userMessage = 'Network error: Cannot connect to backend server. Please ensure the backend is running on port 8000.';
+      } else {
+        userMessage = `Failed to reset system: ${errorMessage}`;
+      }
+      
+      // Use both alert and console for Tauri compatibility
+      alert(userMessage);
+      console.error('ERROR:', userMessage);
+    } finally {
+      setResettingSystem(false);
     }
   };
 
@@ -284,9 +359,10 @@ function Layout() {
                 size="small"
                 startIcon={<RefreshIcon />}
                 onClick={handleResetSystem}
-                sx={{ mr: 1, color: 'white', borderColor: 'white', '&:hover': { borderColor: 'white', bgcolor: 'rgba(255,255,255,0.1)' } }}
+                disabled={resettingSystem}
+                sx={{ mr: 1, color: 'white', borderColor: 'white', '&:hover': { borderColor: 'white', bgcolor: 'rgba(255,255,255,0.1)' }, '&:disabled': { opacity: 0.6 } }}
               >
-                Reset System
+                {resettingSystem ? 'Resetting...' : 'Reset System'}
               </Button>
               <Button
                 variant="outlined"
