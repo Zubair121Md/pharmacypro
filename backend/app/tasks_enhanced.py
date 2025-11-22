@@ -339,6 +339,130 @@ def normalize_product_name(product_name: str) -> str:
     
     return normalized
 
+def find_best_matching_pharmacy(pharmacy_name: str, generated_id: str, master_data: List[MasterMapping], db: Session) -> Optional[Tuple[str, MasterMapping]]:
+    """
+    Find the best matching pharmacy in master data using fuzzy matching on pharmacy names.
+    CRITICAL: Only matches if IDs are similar (same pharmacy, different name variation).
+    Returns the matched pharmacy_id and a sample master record, or None if no good match found.
+    
+    Args:
+        pharmacy_name: The pharmacy name from invoice
+        generated_id: The generated pharmacy ID from invoice (format: FACILITY-LOCATION)
+        master_data: List of all master records
+        db: Database session (for logging)
+    
+    Returns:
+        Tuple of (matched_pharmacy_id, sample_master_record) or None
+    """
+    try:
+        from fuzzywuzzy import fuzz, process
+        
+        # Normalize IDs for comparison (replace dashes with underscores, uppercase)
+        normalized_generated_id = generated_id.replace('-', '_').upper()
+        
+        # Extract facility code (first 10 chars before dash/underscore)
+        generated_facility = normalized_generated_id.split('_')[0] if '_' in normalized_generated_id else normalized_generated_id[:10]
+        
+        # Normalize the input pharmacy name for comparison
+        normalized_input = normalize_text(pharmacy_name, 20, from_end=False).lower()
+        
+        # Create a list of unique pharmacy names with their IDs from master data
+        # Store: pharmacy_id -> (pharmacy_name, normalized_name, normalized_id, facility_code, sample_record)
+        pharmacy_candidates = {}
+        for record in master_data:
+            if record.pharmacy_id not in pharmacy_candidates:
+                normalized_master = normalize_text(record.pharmacy_names, 20, from_end=False).lower()
+                normalized_master_id = record.pharmacy_id.replace('-', '_').upper()
+                master_facility = normalized_master_id.split('_')[0] if '_' in normalized_master_id else normalized_master_id[:10]
+                pharmacy_candidates[record.pharmacy_id] = (
+                    record.pharmacy_names,
+                    normalized_master,
+                    normalized_master_id,
+                    master_facility,
+                    record
+                )
+        
+        if not pharmacy_candidates:
+            return None
+        
+        # Strategy 0: ID-based filtering - Only consider pharmacies with similar facility codes
+        # This prevents matching completely different pharmacies
+        id_similar_candidates = {}
+        for pharmacy_id, (name, norm, norm_id, facility, record) in pharmacy_candidates.items():
+            # Check if facility codes are similar
+            # First check: Exact prefix match (first 8 chars) - highest confidence
+            if len(generated_facility) >= 8 and len(facility) >= 8:
+                if generated_facility[:8] == facility[:8]:
+                    id_similar_candidates[pharmacy_id] = (name, norm, norm_id, facility, record)
+                    continue
+            
+            # Second check: High similarity (85%+) for facility codes
+            facility_similarity = fuzz.ratio(generated_facility[:10], facility[:10])
+            if facility_similarity >= 85:  # At least 85% ID similarity required
+                id_similar_candidates[pharmacy_id] = (name, norm, norm_id, facility, record)
+        
+        # If no ID-similar candidates, don't match (prevents wrong matches)
+        if not id_similar_candidates:
+            logger.debug(f"No ID-similar pharmacies found for '{pharmacy_name}' (generated_id: {generated_id})")
+            return None
+        
+        # Strategy 1: Exact normalized match (only in ID-similar candidates)
+        for pharmacy_id, (name, normalized, norm_id, facility, record) in id_similar_candidates.items():
+            if normalized == normalized_input:
+                logger.info(f"Exact pharmacy name match: '{pharmacy_name}' -> '{name}' (ID: {pharmacy_id}, id_similarity: {fuzz.ratio(generated_facility, facility)})")
+                return (pharmacy_id, record)
+        
+        # Strategy 2: Fuzzy match on normalized names (HIGH threshold - 90+)
+        candidate_names = [(pid, name, norm, norm_id, facility) for pid, (name, norm, norm_id, facility, _) in id_similar_candidates.items()]
+        normalized_names = [norm for _, _, norm, _, _ in candidate_names]
+        
+        fuzzy_match = process.extractOne(normalized_input, normalized_names, score_cutoff=90)
+        if fuzzy_match:
+            matched_normalized, score = fuzzy_match
+            for pharmacy_id, name, norm, norm_id, facility in candidate_names:
+                if norm == matched_normalized:
+                    id_similarity = fuzz.ratio(generated_facility, facility)
+                    logger.info(f"High-precision fuzzy pharmacy match: '{pharmacy_name}' -> '{name}' (ID: {pharmacy_id}, name_score: {score}, id_similarity: {id_similarity})")
+                    return (pharmacy_id, id_similar_candidates[pharmacy_id][4])
+        
+        # Strategy 3: Fuzzy match on original names (HIGH threshold - 88+)
+        original_names = [(pid, name, norm_id, facility) for pid, (name, _, norm_id, facility, _) in id_similar_candidates.items()]
+        name_list = [name for _, name, _, _ in original_names]
+        
+        fuzzy_match = process.extractOne(pharmacy_name, name_list, score_cutoff=88)
+        if fuzzy_match:
+            matched_name, score = fuzzy_match
+            for pharmacy_id, name, norm_id, facility in original_names:
+                if name == matched_name:
+                    id_similarity = fuzz.ratio(generated_facility, facility)
+                    logger.info(f"Medium-precision fuzzy pharmacy match: '{pharmacy_name}' -> '{name}' (ID: {pharmacy_id}, name_score: {score}, id_similarity: {id_similarity})")
+                    return (pharmacy_id, id_similar_candidates[pharmacy_id][4])
+        
+        # Strategy 4: Partial ratio match (HIGH threshold - 85+)
+        best_match = None
+        best_score = 0
+        for pharmacy_id, (name, norm, norm_id, facility, record) in id_similar_candidates.items():
+            # Use partial_ratio for substring matches
+            score = fuzz.partial_ratio(pharmacy_name.lower(), name.lower())
+            if score > best_score and score >= 85:  # Increased threshold
+                id_similarity = fuzz.ratio(generated_facility, facility)
+                best_score = score
+                best_match = (pharmacy_id, record, name, id_similarity)
+        
+        if best_match:
+            pharmacy_id, record, matched_name, id_similarity = best_match
+            logger.info(f"Partial ratio pharmacy match: '{pharmacy_name}' -> '{matched_name}' (ID: {pharmacy_id}, name_score: {best_score}, id_similarity: {id_similarity})")
+            return (pharmacy_id, record)
+        
+        return None
+        
+    except ImportError:
+        logger.warning("fuzzywuzzy not installed, cannot perform fuzzy pharmacy matching")
+        return None
+    except Exception as e:
+        logger.warning(f"Error in fuzzy pharmacy matching for '{pharmacy_name}': {str(e)}")
+        return None
+
 def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tuple[int, int]:
     """
     Merge invoice data with master data using STRICT Pharmacy + Product matching
@@ -409,37 +533,62 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
             # Normalize ID for matching (replace - with _)
             normalized_id = generated_id.replace('-', '_')
             
+            # Get pharmacy name from the row (try different column names)
+            pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
+            
             # Try multiple matching strategies
             master_records = []
             match_method = None
             lookup_key_exact = None
             lookup_key_fuzzy = None
+            matched_pharmacy_id = normalized_id  # Default to generated ID
             
-            # Strategy 1: Exact normalized product name match
+            # Strategy 1: Exact normalized product name match with exact pharmacy_id
             normalized_product = normalize_product_name(row['product'])
             lookup_key_exact = f"{normalized_id}|EXACT|{normalized_product}"
             master_records = master_lookup.get(lookup_key_exact, [])
             if master_records:
                 match_method = "exact"
             
-            # Strategy 2: Fuzzy match via product reference table
+            # Strategy 2: If exact pharmacy_id match failed, try fuzzy pharmacy name matching
+            if not master_records:
+                fuzzy_pharmacy_match = find_best_matching_pharmacy(pharmacy_name, normalized_id, master_data, db)
+                if fuzzy_pharmacy_match:
+                    matched_pharmacy_id, sample_record = fuzzy_pharmacy_match
+                    # Try matching with the fuzzy-matched pharmacy_id
+                    lookup_key_exact = f"{matched_pharmacy_id}|EXACT|{normalized_product}"
+                    master_records = master_lookup.get(lookup_key_exact, [])
+                    if master_records:
+                        match_method = "exact_pharmacy_fuzzy"
+                        logger.info(f"Matched pharmacy via fuzzy name: '{pharmacy_name}' (generated: {normalized_id}) -> '{sample_record.pharmacy_names}' (matched: {matched_pharmacy_id})")
+            
+            # Strategy 3: Fuzzy match via product reference table (with matched pharmacy_id)
             if not master_records and use_product_matching:
                 try:
                     product_id, product_price, matched_original = generate_product_id(row['product'], db, product_ref_mapping)
                     if product_id:
-                        lookup_key_fuzzy = f"{normalized_id}|PID|{product_id}"
+                        # Try with matched_pharmacy_id (could be fuzzy-matched)
+                        lookup_key_fuzzy = f"{matched_pharmacy_id}|PID|{product_id}"
                         master_records = master_lookup.get(lookup_key_fuzzy, [])
                         if master_records:
-                            match_method = "fuzzy"
-                            logger.debug(f"Fuzzy matched: '{row['product']}' -> '{matched_original}' (ID: {product_id}) for pharmacy {normalized_id}")
+                            match_method = "fuzzy" if match_method != "exact_pharmacy_fuzzy" else "fuzzy_pharmacy_and_product"
+                            logger.debug(f"Fuzzy matched: '{row['product']}' -> '{matched_original}' (ID: {product_id}) for pharmacy {matched_pharmacy_id}")
+                        # If still no match and we haven't tried fuzzy pharmacy yet, try fuzzy pharmacy matching
+                        if not master_records and matched_pharmacy_id == normalized_id:
+                            fuzzy_pharmacy_match = find_best_matching_pharmacy(pharmacy_name, normalized_id, master_data, db)
+                            if fuzzy_pharmacy_match:
+                                matched_pharmacy_id, sample_record = fuzzy_pharmacy_match
+                                lookup_key_fuzzy = f"{matched_pharmacy_id}|PID|{product_id}"
+                                master_records = master_lookup.get(lookup_key_fuzzy, [])
+                                if master_records:
+                                    match_method = "fuzzy_pharmacy_and_product"
+                                    logger.info(f"Matched via fuzzy pharmacy + fuzzy product: '{pharmacy_name}' -> '{sample_record.pharmacy_names}' (ID: {matched_pharmacy_id}), product '{row['product']}' -> '{matched_original}'")
                     else:
                         logger.debug(f"Could not find product ID for invoice product '{row['product']}' in reference table")
                 except Exception as e:
                     logger.warning(f"Fuzzy matching failed for '{row['product']}': {str(e)}")
             
             if master_records:
-                # Get pharmacy name from the row (try different column names)
-                pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
                 quantity = int(row['quantity']) if pd.notna(row['quantity']) else 0
                 
                 # Check if there's a split rule for this pharmacy+product combination
@@ -449,32 +598,32 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 lookup_key_for_split = None
                 
                 # First try the lookup key that was used for matching
-                if match_method == "exact" and lookup_key_exact:
+                if match_method in ["exact", "exact_pharmacy_fuzzy"] and lookup_key_exact:
                     lookup_key_for_split = lookup_key_exact
                     split_rule = db.query(MasterSplitRule).filter_by(
-                        pharmacy_id=normalized_id,
+                        pharmacy_id=matched_pharmacy_id,
                         product_key=lookup_key_exact
                     ).first()
-                elif match_method == "fuzzy" and lookup_key_fuzzy:
+                elif match_method in ["fuzzy", "fuzzy_pharmacy_and_product"] and lookup_key_fuzzy:
                     lookup_key_for_split = lookup_key_fuzzy
                     split_rule = db.query(MasterSplitRule).filter_by(
-                        pharmacy_id=normalized_id,
+                        pharmacy_id=matched_pharmacy_id,
                         product_key=lookup_key_fuzzy
                     ).first()
                 
                 # If no split rule found with the matched key, try the other key as fallback
                 if not split_rule:
-                    if lookup_key_exact and match_method != "exact":
+                    if lookup_key_exact and match_method not in ["exact", "exact_pharmacy_fuzzy"]:
                         split_rule = db.query(MasterSplitRule).filter_by(
-                            pharmacy_id=normalized_id,
+                            pharmacy_id=matched_pharmacy_id,
                             product_key=lookup_key_exact
                         ).first()
                         if split_rule:
                             lookup_key_for_split = lookup_key_exact
                             logger.info(f"Found split rule using EXACT key as fallback for {pharmacy_name} + '{row['product']}'")
-                    elif lookup_key_fuzzy and match_method != "fuzzy":
+                    elif lookup_key_fuzzy and match_method not in ["fuzzy", "fuzzy_pharmacy_and_product"]:
                         split_rule = db.query(MasterSplitRule).filter_by(
-                            pharmacy_id=normalized_id,
+                            pharmacy_id=matched_pharmacy_id,
                             product_key=lookup_key_fuzzy
                         ).first()
                         if split_rule:
@@ -484,7 +633,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 # If still no split rule found, try to find any split rule for this pharmacy+product
                 # by checking if the product_key contains a matching normalized product
                 if not split_rule and normalized_product:
-                    all_rules = db.query(MasterSplitRule).filter_by(pharmacy_id=normalized_id).all()
+                    all_rules = db.query(MasterSplitRule).filter_by(pharmacy_id=matched_pharmacy_id).all()
                     for rule in all_rules:
                         if not rule.product_key:
                             continue
@@ -544,7 +693,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                             allocated_revenue = total_revenue * ratio
                             
                             invoice = Invoice(
-                                pharmacy_id=normalized_id,
+                                pharmacy_id=matched_pharmacy_id,
                                 pharmacy_name=pharmacy_name,
                                 product=row['product'],
                                 quantity=allocated_quantity,
@@ -561,7 +710,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                         product_price = float(master_record.product_price) if master_record.product_price else 0.0
                         calculated_revenue = quantity * product_price
                         invoice = Invoice(
-                            pharmacy_id=normalized_id,
+                            pharmacy_id=matched_pharmacy_id,
                             pharmacy_name=pharmacy_name,
                             product=row['product'],
                             quantity=quantity,
@@ -579,7 +728,7 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                     calculated_revenue = quantity * product_price
                     
                     invoice = Invoice(
-                        pharmacy_id=normalized_id,
+                        pharmacy_id=matched_pharmacy_id,
                         pharmacy_name=pharmacy_name,
                         product=row['product'],
                         quantity=quantity,
@@ -599,11 +748,18 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
                 
                 # Log why it didn't match for debugging
+                # Try fuzzy pharmacy matching one more time as a last resort
+                if matched_pharmacy_id == normalized_id:
+                    fuzzy_pharmacy_match = find_best_matching_pharmacy(pharmacy_name, normalized_id, master_data, db)
+                    if fuzzy_pharmacy_match:
+                        matched_pharmacy_id, sample_record = fuzzy_pharmacy_match
+                        logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' - Found similar pharmacy '{sample_record.pharmacy_names}' (ID: {matched_pharmacy_id}) but no matching product")
+                
                 if use_product_matching:
                     try:
                         product_id, _, matched_original = generate_product_id(row['product'], db, product_ref_mapping)
                         if product_id:
-                            logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' (Product ID: {product_id}, matched to '{matched_original}') - No master record found for pharmacy_id={normalized_id}")
+                            logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' (Product ID: {product_id}, matched to '{matched_original}') - No master record found for pharmacy_id={normalized_id} (tried fuzzy match: {matched_pharmacy_id})")
                         else:
                             logger.warning(f"Unmatched: {pharmacy_name} + '{row['product']}' - Product not found in reference table")
                     except Exception as e:
@@ -651,7 +807,9 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
 
 def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict]:
     """
-    Get matched results with proper doctor allocation and correct output format
+    Get matched results with proper doctor allocation and correct output format.
+    Uses master_mapping_id to get correct pharmacy information from master data,
+    not the potentially incorrect pharmacy from invoice (which may be wrong due to fuzzy matching).
     
     Returns:
         List of dictionaries with columns: Doctor_ID | Doctor_Name | REP_Name | Pharmacy_Name | Pharmacy_ID | Product | Quantity | Revenue
@@ -663,7 +821,10 @@ def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict
         # Get all master data
         master_data = db.query(MasterMapping).all()
         
-        # Create lookup by pharmacy_id + normalized_product
+        # Create lookup by master_mapping_id for direct access (most accurate)
+        master_by_id = {record.id: record for record in master_data}
+        
+        # Create lookup by pharmacy_id + normalized_product (fallback for old invoices)
         master_lookup = {}
         for record in master_data:
             normalized_product = normalize_product_name(record.product_names)
@@ -672,13 +833,17 @@ def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict
         
         results = []
         for invoice in invoices:
-            # Normalize product name for matching
-            normalized_product = normalize_product_name(invoice.product)
+            master_record = None
             
-            # Create composite key for lookup
-            lookup_key = f"{invoice.pharmacy_id}|{normalized_product}"
+            # First, try to use master_mapping_id for direct linking (most accurate, especially for split rules)
+            # This ensures we get the CORRECT pharmacy from master data, not the potentially wrong one from invoice
+            if invoice.master_mapping_id:
+                master_record = master_by_id.get(invoice.master_mapping_id)
             
-            # Find matching master record
+            # Fallback: Use lookup by pharmacy_id + normalized_product (for old invoices without master_mapping_id)
+            if not master_record:
+                normalized_product = normalize_product_name(invoice.product)
+                lookup_key = f"{invoice.pharmacy_id}|{normalized_product}"
             master_record = master_lookup.get(lookup_key)
             
             if master_record:
@@ -686,8 +851,8 @@ def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict
                     "Doctor_ID": master_record.doctor_id,
                     "Doctor_Name": master_record.doctor_names,
                     "REP_Name": master_record.rep_names,
-                    "Pharmacy_Name": invoice.pharmacy_name,
-                    "Pharmacy_ID": invoice.pharmacy_id,
+                    "Pharmacy_Name": master_record.pharmacy_names,  # Use master data, not invoice (correct pharmacy)
+                    "Pharmacy_ID": master_record.pharmacy_id,  # Use master data, not invoice (correct pharmacy)
                     "Product": invoice.product,
                     "Quantity": invoice.quantity,
                     "Revenue": float(invoice.amount)
