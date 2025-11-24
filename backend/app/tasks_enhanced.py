@@ -724,25 +724,25 @@ def merge_invoice_with_master(df: pd.DataFrame, user_id: int, db: Session) -> Tu
                 else:
                     # No split rule or only one master record - use first/only record
                     master_record = master_records[0]
-                    product_price = float(master_record.product_price) if master_record.product_price else 0.0
-                    calculated_revenue = quantity * product_price
-                    
-                    invoice = Invoice(
+                product_price = float(master_record.product_price) if master_record.product_price else 0.0
+                calculated_revenue = quantity * product_price
+                
+                invoice = Invoice(
                         pharmacy_id=matched_pharmacy_id,
-                        pharmacy_name=pharmacy_name,
-                        product=row['product'],
-                        quantity=quantity,
+                    pharmacy_name=pharmacy_name,
+                    product=row['product'],
+                    quantity=quantity,
                         amount=calculated_revenue,
                         user_id=user_id,
                         master_mapping_id=master_record.id  # Link to specific master record (doctor)
-                    )
-                    db.add(invoice)
-                    matched_count += 1
-                    
-                    if len(master_records) > 1:
-                        logger.warning(f"Multiple masters ({len(master_records)}) for {pharmacy_name} + '{row['product']}' but no split rule - using first: {master_record.doctor_names}")
-                    else:
-                        logger.info(f"Matched ({match_method}): {pharmacy_name} + '{row['product']}' -> {master_record.doctor_names} (Revenue: {calculated_revenue})")
+                )
+                db.add(invoice)
+                matched_count += 1
+                
+                if len(master_records) > 1:
+                    logger.warning(f"Multiple masters ({len(master_records)}) for {pharmacy_name} + '{row['product']}' but no split rule - using first: {master_record.doctor_names}")
+                else:
+                    logger.info(f"Matched ({match_method}): {pharmacy_name} + '{row['product']}' -> {master_record.doctor_names} (Revenue: {calculated_revenue})")
             else:
                 # Get pharmacy name from the row (try different column names)
                 pharmacy_name = row.get('pharmacy_name', row.get('facility_name', row.get('original_pharmacy_name', 'Unknown')))
@@ -844,7 +844,7 @@ def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict
             if not master_record:
                 normalized_product = normalize_product_name(invoice.product)
                 lookup_key = f"{invoice.pharmacy_id}|{normalized_product}"
-            master_record = master_lookup.get(lookup_key)
+                master_record = master_lookup.get(lookup_key)
             
             if master_record:
                 result = {
