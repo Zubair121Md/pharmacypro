@@ -3024,20 +3024,19 @@ async def export_master_data(format: str = "xlsx", current_user: User = Depends(
         # Get ALL master data records
         records = db.query(MasterMapping).all()
         
+        # Export in the same format as upload (matching file_processor.py expected columns)
         export_data = [
             {
-                "Pharmacy_ID": r.pharmacy_id,
-                "Pharmacy_Name": r.pharmacy_names,
-                "Product_Name": r.product_names or "",
+                "REP_Names": r.rep_names or "",
+                "Doctor_Names": r.doctor_names or "",
+                "Doctor_ID": r.doctor_id or "",
+                "Pharmacy_Names": r.pharmacy_names or "",
+                "Pharmacy_ID": r.pharmacy_id or "",
+                "Product_Names": r.product_names or "",
                 "Product_ID": r.product_id or "",
                 "Product_Price": float(r.product_price) if r.product_price else 0.0,
-                "Doctor_Name": r.doctor_names or "",
-                "Doctor_ID": r.doctor_id or "",
-                "Rep_Name": r.rep_names or "",
                 "HQ": r.hq or "",
-                "Area": r.area or "",
-                "Source": getattr(r, "source", "file_upload"),
-                "Created_At": r.created_at.isoformat() if r.created_at else ""
+                "AREA": r.area or ""
             }
             for r in records
         ]
@@ -3047,42 +3046,45 @@ async def export_master_data(format: str = "xlsx", current_user: User = Depends(
         # Ensure at least headers exist
         if not export_data:
             export_data = [{
+                "REP_Names": "",
+                "Doctor_Names": "",
+                "Doctor_ID": "",
+                "Pharmacy_Names": "",
                 "Pharmacy_ID": "",
-                "Pharmacy_Name": "",
-                "Product_Name": "",
+                "Product_Names": "",
                 "Product_ID": "",
                 "Product_Price": 0.0,
-                "Doctor_Name": "",
-                "Doctor_ID": "",
-                "Rep_Name": "",
                 "HQ": "",
-                "Area": "",
-                "Source": "",
-                "Created_At": ""
+                "AREA": ""
             }]
         
         if format.lower() == "csv":
             import csv
             output = io.StringIO()
-            fieldnames = ["Pharmacy_ID", "Pharmacy_Name", "Product_Name", "Product_ID", "Product_Price", 
-                         "Doctor_Name", "Doctor_ID", "Rep_Name", "HQ", "Area", "Source", "Created_At"]
+            fieldnames = ["REP_Names", "Doctor_Names", "Doctor_ID", "Pharmacy_Names", "Pharmacy_ID",
+                         "Product_Names", "Product_ID", "Product_Price", "HQ", "AREA"]
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(export_data)
             return Response(
                 content=output.getvalue(), 
                 media_type="text/csv", 
-                headers={"Content-Disposition": "attachment; filename=master_data_backup.csv"}
+                headers={"Content-Disposition": "attachment; filename=master_data.csv"}
             )
         elif format.lower() == "xlsx":
+            # Ensure column order matches upload format exactly
+            column_order = ["REP_Names", "Doctor_Names", "Doctor_ID", "Pharmacy_Names", "Pharmacy_ID",
+                          "Product_Names", "Product_ID", "Product_Price", "HQ", "AREA"]
             df = pd.DataFrame(export_data)
+            # Reorder columns to match upload format
+            df = df[column_order]
             output = io.BytesIO()
             df.to_excel(output, index=False, engine='openpyxl')
             output.seek(0)
             return Response(
                 content=output.getvalue(), 
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
-                headers={"Content-Disposition": "attachment; filename=master_data_backup.xlsx"}
+                headers={"Content-Disposition": "attachment; filename=master_data.xlsx"}
             )
         else:
             raise HTTPException(status_code=400, detail="Unsupported format. Use 'csv' or 'xlsx'")
