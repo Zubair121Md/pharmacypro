@@ -106,6 +106,9 @@ export const analyticsAPI = {
     params: { format },
     responseType: 'blob'
   }),
+  getPharmacyBreakdown: (pharmacyName) => api.get('/api/v1/analytics/pharmacy-breakdown', {
+    params: { pharmacy_name: pharmacyName }
+  }),
 };
 
 // Admin API

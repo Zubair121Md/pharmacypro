@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Body
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Body, Query
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
+from collections import defaultdict
 from sqlalchemy.orm import Session
 import pandas as pd
 import json
@@ -336,7 +337,7 @@ async def login(login_data: dict):
         if username == "admin" and password == "admin123":
             user = User(id=1, username="admin", email="admin@pharmacy.com", full_name="Admin User", role="super_admin")
             return {
-                "access_token": "demo_token_12345", 
+                "access_token": "demo_token_12345",
                 "token_type": "bearer",
                 "user": {
                     "id": user.id,
@@ -349,7 +350,7 @@ async def login(login_data: dict):
         elif username == "manager" and password == "manager123":
             user = User(id=2, username="manager", email="manager@pharmacy.com", full_name="Manager User", role="admin")
             return {
-                "access_token": "demo_token_manager_12345", 
+                "access_token": "demo_token_manager_12345",
                 "token_type": "bearer",
                 "user": {
                     "id": user.id,
@@ -362,7 +363,7 @@ async def login(login_data: dict):
         elif username == "user" and password == "user123":
             user = User(id=3, username="user", email="user@pharmacy.com", full_name="Regular User", role="user")
             return {
-                "access_token": "demo_token_user_12345", 
+                "access_token": "demo_token_user_12345",
                 "token_type": "bearer",
                 "user": {
                     "id": user.id,
@@ -375,10 +376,10 @@ async def login(login_data: dict):
         
         logger.warning(f"Failed login attempt: username={username}")
         raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Incorrect username or password",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -387,6 +388,153 @@ async def login(login_data: dict):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Login failed: {str(e)}"
         )
+
+@app.get("/api/v1/analytics/pharmacy-breakdown")
+async def get_pharmacy_breakdown(
+    pharmacy_name: str = Query(..., min_length=1),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Provide detailed revenue/quantity breakdown for a specific pharmacy.
+    """
+    from app.database import get_db, Invoice, MasterMapping
+    db = None
+    try:
+        db = next(get_db())
+        invoices = (
+            db.query(Invoice)
+            .filter(Invoice.pharmacy_name == pharmacy_name)
+            .all()
+        )
+        
+        if not invoices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No invoices found for pharmacy '{pharmacy_name}'"
+            )
+        
+        master_ids = [inv.master_mapping_id for inv in invoices if inv.master_mapping_id]
+        master_map = {}
+        if master_ids:
+            masters = (
+                db.query(MasterMapping)
+                .filter(MasterMapping.id.in_(master_ids))
+                .all()
+            )
+            master_map = {m.id: m for m in masters}
+        
+        def calc_revenue(inv, master):
+            try:
+                if inv.amount:
+                    return float(inv.amount)
+            except Exception:
+                pass
+            quantity = 0
+            try:
+                quantity = int(inv.quantity or 0)
+            except Exception:
+                quantity = 0
+            price = 0.0
+            if master and master.product_price:
+                try:
+                    price = float(master.product_price)
+                except Exception:
+                    price = 0.0
+            return float(quantity) * price
+        
+        product_breakdown = defaultdict(lambda: {"revenue": 0.0, "quantity": 0})
+        doctor_breakdown = defaultdict(lambda: {"revenue": 0.0, "quantity": 0})
+        rep_breakdown = defaultdict(lambda: {"revenue": 0.0, "quantity": 0})
+        timeline_breakdown = defaultdict(lambda: {"revenue": 0.0, "quantity": 0})
+        recent_invoices = []
+        
+        total_revenue = 0.0
+        total_quantity = 0
+        pharmacy_id = invoices[0].pharmacy_id
+        
+        for inv in invoices:
+            master = master_map.get(inv.master_mapping_id)
+            revenue = calc_revenue(inv, master)
+            quantity = int(inv.quantity or 0)
+            total_revenue += revenue
+            total_quantity += quantity
+            
+            product_name = master.product_names if master and master.product_names else inv.product or "Unknown"
+            doctor_name = master.doctor_names if master and master.doctor_names else "Unknown"
+            rep_name = master.rep_names if master and master.rep_names else "Unknown"
+            
+            product_breakdown[product_name]["revenue"] += revenue
+            product_breakdown[product_name]["quantity"] += quantity
+            doctor_breakdown[doctor_name]["revenue"] += revenue
+            doctor_breakdown[doctor_name]["quantity"] += quantity
+            rep_breakdown[rep_name]["revenue"] += revenue
+            rep_breakdown[rep_name]["quantity"] += quantity
+            
+            invoice_date = inv.invoice_date
+            parsed = None
+            if invoice_date:
+                if isinstance(invoice_date, datetime):
+                    parsed = invoice_date
+                else:
+                    try:
+                        parsed = datetime.fromisoformat(str(invoice_date))
+                    except Exception:
+                        parsed = None
+            timeline_key = parsed.strftime("%Y-%m") if parsed else "Unknown"
+            timeline_breakdown[timeline_key]["revenue"] += revenue
+            timeline_breakdown[timeline_key]["quantity"] += quantity
+            
+            recent_invoices.append({
+                "invoice_id": inv.id,
+                "product": product_name,
+                "doctor": doctor_name,
+                "rep": rep_name,
+                "quantity": quantity,
+                "revenue": revenue,
+                "invoice_date": parsed.isoformat() if parsed else (str(inv.invoice_date) if inv.invoice_date else None),
+            })
+        
+        def format_breakdown(source_map):
+            return [
+                {
+                    "name": name,
+                    "revenue": round(values["revenue"], 2),
+                    "quantity": values["quantity"]
+                }
+                for name, values in sorted(source_map.items(), key=lambda x: x[1]["revenue"], reverse=True)
+            ]
+        
+        response = {
+            "pharmacy_name": pharmacy_name,
+            "pharmacy_id": pharmacy_id,
+            "total_revenue": round(total_revenue, 2),
+            "total_quantity": total_quantity,
+            "products": format_breakdown(product_breakdown),
+            "doctors": format_breakdown(doctor_breakdown),
+            "representatives": format_breakdown(rep_breakdown),
+            "timeline": [
+                {
+                    "period": period,
+                    "revenue": round(values["revenue"], 2),
+                    "quantity": values["quantity"]
+                }
+                for period, values in sorted(timeline_breakdown.items())
+            ],
+            "recent_invoices": sorted(
+                recent_invoices,
+                key=lambda x: x["invoice_date"] or "",
+                reverse=True
+            )[:25]
+        }
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Pharmacy breakdown error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get breakdown: {str(e)}")
+    finally:
+        if db:
+            db.close()
 
 @app.get("/api/v1/auth/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_user)):

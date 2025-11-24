@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Card,
@@ -53,6 +53,7 @@ function UnmatchedRecords() {
   const [masterPharmacies, setMasterPharmacies] = useState([]);
   const [pharmacySearchQuery, setPharmacySearchQuery] = useState('');
   const [filteredPharmacies, setFilteredPharmacies] = useState([]);
+  const [sortOption, setSortOption] = useState('created_desc');
 
   useEffect(() => {
     fetchUnmatchedRecords();
@@ -185,6 +186,44 @@ function UnmatchedRecords() {
     return matchesFilter && matchesSearch;
   });
 
+  const sortedRecords = useMemo(() => {
+    const recordsCopy = [...filteredRecords];
+    const parseDate = (value) => {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+    };
+
+    switch (sortOption) {
+      case 'name_asc':
+        recordsCopy.sort((a, b) => a.pharmacy_name.localeCompare(b.pharmacy_name));
+        break;
+      case 'name_desc':
+        recordsCopy.sort((a, b) => b.pharmacy_name.localeCompare(a.pharmacy_name));
+        break;
+      case 'quantity_desc':
+        recordsCopy.sort((a, b) => (Number(b.quantity || 0) - Number(a.quantity || 0)));
+        break;
+      case 'quantity_asc':
+        recordsCopy.sort((a, b) => (Number(a.quantity || 0) - Number(b.quantity || 0)));
+        break;
+      case 'revenue_desc':
+        recordsCopy.sort((a, b) => (Number(b.amount || 0) - Number(a.amount || 0)));
+        break;
+      case 'revenue_asc':
+        recordsCopy.sort((a, b) => (Number(a.amount || 0) - Number(b.amount || 0)));
+        break;
+      case 'created_asc':
+        recordsCopy.sort((a, b) => parseDate(a.created_at) - parseDate(b.created_at));
+        break;
+      case 'created_desc':
+      default:
+        recordsCopy.sort((a, b) => parseDate(b.created_at) - parseDate(a.created_at));
+        break;
+    }
+
+    return recordsCopy;
+  }, [filteredRecords, sortOption]);
+
   const getStatusColor = (status) => {
     switch (status) {
       case 'pending':
@@ -239,7 +278,7 @@ function UnmatchedRecords() {
 
       <Card sx={{ mt: 2 }}>
         <CardContent>
-          <Box display="flex" gap={2} mb={2} alignItems="center">
+          <Box display="flex" gap={2} mb={2} alignItems="center" flexWrap="wrap">
             <TextField
               size="small"
               placeholder="Search pharmacy names..."
@@ -260,6 +299,23 @@ function UnmatchedRecords() {
                 <MenuItem value="pending">Pending</MenuItem>
                 <MenuItem value="mapped">Mapped</MenuItem>
                 <MenuItem value="ignored">Ignored</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: 160 }}>
+              <InputLabel>Sort By</InputLabel>
+              <Select
+                value={sortOption}
+                label="Sort By"
+                onChange={(e) => setSortOption(e.target.value)}
+              >
+                <MenuItem value="created_desc">Newest first</MenuItem>
+                <MenuItem value="created_asc">Oldest first</MenuItem>
+                <MenuItem value="name_asc">Name A → Z</MenuItem>
+                <MenuItem value="name_desc">Name Z → A</MenuItem>
+                <MenuItem value="quantity_desc">Quantity high → low</MenuItem>
+                <MenuItem value="quantity_asc">Quantity low → high</MenuItem>
+                <MenuItem value="revenue_desc">Revenue high → low</MenuItem>
+                <MenuItem value="revenue_asc">Revenue low → high</MenuItem>
               </Select>
             </FormControl>
           </Box>
@@ -283,7 +339,7 @@ function UnmatchedRecords() {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {filteredRecords.map((record) => (
+                {sortedRecords.map((record) => (
                   <TableRow key={record.id}>
                     <TableCell>{record.pharmacy_name}</TableCell>
                     <TableCell>{record.generated_id}</TableCell>

@@ -844,7 +844,7 @@ def get_matched_results_with_doctor_info(db: Session, user_id: int) -> List[Dict
             if not master_record:
                 normalized_product = normalize_product_name(invoice.product)
                 lookup_key = f"{invoice.pharmacy_id}|{normalized_product}"
-                master_record = master_lookup.get(lookup_key)
+            master_record = master_lookup.get(lookup_key)
             
             if master_record:
                 result = {

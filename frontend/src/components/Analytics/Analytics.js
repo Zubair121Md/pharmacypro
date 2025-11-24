@@ -26,6 +26,12 @@ import {
   Accordion,
   AccordionSummary,
   AccordionDetails,
+  TextField,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Divider,
 } from '@mui/material';
 import {
   BarChart,
@@ -67,8 +73,29 @@ const formatCurrency = (value) => {
   }).format(value);
 };
 
+const formatDate = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
 // List View Component
-function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns }) {
+function RevenueListView({
+  data,
+  title,
+  nameKey,
+  revenueKey,
+  color,
+  extraColumns,
+  valueFormatter = formatCurrency,
+  metricLabel = 'Revenue',
+  showPercentage = true,
+  summaryFormatter,
+  onRowClick,
+}) {
   if (!data || data.length === 0) {
     return (
       <Box>
@@ -84,7 +111,10 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
     );
   }
 
-  const totalRevenue = data.reduce((sum, item) => sum + (item[revenueKey] || 0), 0);
+  const totalValue = data.reduce((sum, item) => sum + (item[revenueKey] || 0), 0);
+  const formattedSummary = summaryFormatter
+    ? summaryFormatter(totalValue)
+    : valueFormatter(totalValue);
 
   return (
     <Box>
@@ -93,9 +123,9 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
           <Typography variant="h6" gutterBottom>
             {title}
           </Typography>
-          <Chip 
-            label={`Total: ${formatCurrency(totalRevenue)}`} 
-            color="primary" 
+          <Chip
+            label={`Total: ${formattedSummary}`}
+            color="primary"
             variant="outlined"
           />
         </Box>
@@ -103,9 +133,9 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
       
       {!title && (
         <Box display="flex" justifyContent="flex-end" alignItems="center" mb={2}>
-          <Chip 
-            label={`Total: ${formatCurrency(totalRevenue)}`} 
-            color="primary" 
+          <Chip
+            label={`Total: ${formattedSummary}`}
+            color="primary"
             variant="outlined"
           />
         </Box>
@@ -117,8 +147,10 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
               <TableRow>
                 <TableCell><strong>Rank</strong></TableCell>
                 <TableCell><strong>Name</strong></TableCell>
-                <TableCell align="right"><strong>Revenue</strong></TableCell>
-                <TableCell align="right"><strong>% of Total</strong></TableCell>
+                <TableCell align="right"><strong>{metricLabel}</strong></TableCell>
+                {showPercentage && (
+                  <TableCell align="right"><strong>% of Total</strong></TableCell>
+                )}
                 {extraColumns?.map((col, idx) => (
                   <TableCell key={idx} align={col.align || 'left'}>
                     <strong>{col.label}</strong>
@@ -128,14 +160,25 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
             </TableHead>
             <TableBody>
               {data.map((item, index) => {
-                const percentage = totalRevenue > 0 ? ((item[revenueKey] || 0) / totalRevenue * 100) : 0;
+                const metricValue = item[revenueKey] || 0;
+                const percentage = totalValue > 0 ? ((metricValue) / totalValue * 100) : 0;
+                const handleClick = () => {
+                  if (onRowClick) {
+                    onRowClick(item);
+                  }
+                };
                 return (
-                  <TableRow key={index} hover>
+                  <TableRow
+                    key={index}
+                    hover={!!onRowClick}
+                    onClick={onRowClick ? handleClick : undefined}
+                    sx={{ cursor: onRowClick ? 'pointer' : 'default' }}
+                  >
                     <TableCell>
-                      <Chip 
-                        label={index + 1} 
-                        size="small" 
-                        color="primary" 
+                      <Chip
+                        label={index + 1}
+                        size="small"
+                        color="primary"
                         variant="outlined"
                       />
                     </TableCell>
@@ -146,14 +189,16 @@ function RevenueListView({ data, title, nameKey, revenueKey, color, extraColumns
                     </TableCell>
                     <TableCell align="right">
                       <Typography variant="body2" fontWeight="bold" color={color}>
-                        {formatCurrency(item[revenueKey] || 0)}
+                        {valueFormatter(metricValue)}
                       </Typography>
                     </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2" color="text.secondary">
-                        {percentage.toFixed(1)}%
-                      </Typography>
-                    </TableCell>
+                    {showPercentage && (
+                      <TableCell align="right">
+                        <Typography variant="body2" color="text.secondary">
+                          {percentage.toFixed(1)}%
+                        </Typography>
+                      </TableCell>
+                    )}
                     {extraColumns?.map((col, idx) => (
                       <TableCell key={idx} align={col.align || 'left'}>
                         <Typography variant="body2" noWrap>
@@ -218,6 +263,12 @@ function Analytics() {
   const [dataQuality, setDataQuality] = useState(null);
   const [dqLoading, setDqLoading] = useState(false);
   const [dqError, setDqError] = useState(null);
+  const [breakdownDialogOpen, setBreakdownDialogOpen] = useState(false);
+  const [pharmacyBreakdown, setPharmacyBreakdown] = useState(null);
+  const [breakdownLoading, setBreakdownLoading] = useState(false);
+  const [breakdownError, setBreakdownError] = useState(null);
+  const [quantityThreshold, setQuantityThreshold] = useState('');
+  const [showLowQuantity, setShowLowQuantity] = useState(false);
 
   const refreshAllAnalytics = useCallback(() => {
     dispatch(fetchRevenueByPharmacy());
@@ -279,6 +330,62 @@ function Analytics() {
   const handleRefresh = () => {
     refreshAllAnalytics();
   };
+  
+  const handleCloseBreakdown = () => {
+    setBreakdownDialogOpen(false);
+  };
+  
+  const renderBreakdownTable = (title, rows, nameLabel = 'Name') => (
+    <Box mb={3}>
+      <Typography variant="subtitle1" gutterBottom>
+        {title}
+      </Typography>
+      {!rows || rows.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          No data available
+        </Typography>
+      ) : (
+        <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 300 }}>
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>{nameLabel}</TableCell>
+                <TableCell align="right">Revenue</TableCell>
+                <TableCell align="right">Quantity</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {rows.map((row, idx) => (
+                <TableRow key={`${title}-${row.name}-${idx}`}>
+                  <TableCell>{row.name || '-'}</TableCell>
+                  <TableCell align="right">{formatCurrency(row.revenue || 0)}</TableCell>
+                  <TableCell align="right">{row.quantity ?? 0}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+    </Box>
+  );
+  
+  const handlePharmacySelect = useCallback(async (pharmacyName) => {
+    if (!pharmacyName) return;
+    setBreakdownLoading(true);
+    setBreakdownError(null);
+    try {
+      const res = await analyticsAPI.getPharmacyBreakdown(pharmacyName);
+      setPharmacyBreakdown(res.data);
+      setBreakdownDialogOpen(true);
+    } catch (error) {
+      const message = error.response?.data?.detail || error.message || 'Failed to load breakdown';
+      setBreakdownError(message);
+      setPharmacyBreakdown(null);
+      setBreakdownDialogOpen(true);
+    } finally {
+      setBreakdownLoading(false);
+    }
+  }, []);
 
   if (loading) {
     return (
@@ -369,7 +476,11 @@ function Analytics() {
                   <XAxis dataKey="name" />
                   <YAxis />
                   <Tooltip formatter={(value) => [`₹${value.toLocaleString('en-IN')}`, 'Revenue']} />
-                  <Bar dataKey="revenue" fill="#8884d8" />
+                  <Bar
+                    dataKey="revenue"
+                    fill="#8884d8"
+                    onClick={(data) => handlePharmacySelect(data?.payload?.name || data?.name)}
+                  />
                 </BarChart>
               ) : (
                 <PieChart>
@@ -382,6 +493,7 @@ function Analytics() {
                     outerRadius={(revenueByPharmacy?.length||0) > 20 ? 200 : (revenueByPharmacy?.length||0) > 10 ? 160 : 120}
                     fill="#8884d8"
                     dataKey="revenue"
+                    onClick={(data) => handlePharmacySelect(data?.name || data?.payload?.name)}
                   >
                     {((revenueByPharmacy || []).slice(0,20)).map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -512,17 +624,37 @@ function Analytics() {
               <Typography variant="body2" color="text.secondary">
                 Doctor performance and revenue contribution
               </Typography>
-              <FormControl size="small" sx={{ minWidth: 120 }}>
-                <InputLabel>Chart Type</InputLabel>
-                <Select
-                  value={chartType}
-                  label="Chart Type"
-                  onChange={handleChartTypeChange}
+              <Box display="flex" gap={2} alignItems="center">
+                <TextField
+                  size="small"
+                  label="Quantity Threshold"
+                  type="number"
+                  value={quantityThreshold}
+                  onChange={(e) => setQuantityThreshold(e.target.value)}
+                  placeholder="e.g., 100"
+                  sx={{ width: 150 }}
+                  helperText="Show doctors below this quantity"
+                />
+                <Button
+                  variant={showLowQuantity ? "contained" : "outlined"}
+                  size="small"
+                  onClick={() => setShowLowQuantity(!showLowQuantity)}
+                  disabled={!quantityThreshold || isNaN(Number(quantityThreshold))}
                 >
-                  <MenuItem value="bar">Bar Chart</MenuItem>
-                  <MenuItem value="pie">Pie Chart</MenuItem>
-                </Select>
-              </FormControl>
+                  {showLowQuantity ? "Show All" : "Show Low Quantity"}
+                </Button>
+                <FormControl size="small" sx={{ minWidth: 120 }}>
+                  <InputLabel>Chart Type</InputLabel>
+                  <Select
+                    value={chartType}
+                    label="Chart Type"
+                    onChange={handleChartTypeChange}
+                  >
+                    <MenuItem value="bar">Bar Chart</MenuItem>
+                    <MenuItem value="pie">Pie Chart</MenuItem>
+                  </Select>
+                </FormControl>
+              </Box>
             </Box>
             <ResponsiveContainer width="100%" height={revenueByDoctor?.length > 10 ? 600 : 500}>
               {chartType === 'bar' ? (
@@ -556,6 +688,27 @@ function Analytics() {
                 </PieChart>
               )}
             </ResponsiveContainer>
+            
+            {/* Low Quantity Doctors Section */}
+            {showLowQuantity && quantityThreshold && !isNaN(Number(quantityThreshold)) && (
+              <Box mt={4}>
+                <Typography variant="h6" gutterBottom color="warning.main">
+                  Doctors with Quantity Below {quantityThreshold}
+                </Typography>
+                <RevenueListView
+                  data={(revenueByDoctor || []).filter(doctor => (doctor.quantity || 0) < Number(quantityThreshold))}
+                  title=""
+                  nameKey="doctor_name"
+                  revenueKey="revenue"
+                  color="#FF8042"
+                  extraColumns={[
+                    { label: 'Product', key: 'product_name', value: (row) => row.product_name || '-' },
+                    { label: 'Quantity', key: 'quantity', align: 'right', value: (row) => Number(row.quantity || 0) },
+                    { label: 'Pharmacy', key: 'pharmacy_name', value: (row) => row.pharmacy_name || '-' },
+                  ]}
+                />
+              </Box>
+            )}
           </Box>
         </TabPanel>
 
@@ -885,6 +1038,7 @@ function Analytics() {
                   { label: 'Linked Product', key: 'product_name', value: (row) => row.product_name || '-' },
                   { label: 'Quantity', key: 'quantity', align: 'right', value: (row) => Number(row.quantity || 0) }
                 ]}
+              onRowClick={(row) => handlePharmacySelect(row?.name)}
               />
             </AccordionDetails>
           </Accordion>
@@ -976,6 +1130,109 @@ function Analytics() {
           </Accordion>
         </Box>
       </Box>
+    
+    <Dialog
+      open={breakdownDialogOpen}
+      onClose={handleCloseBreakdown}
+      maxWidth="md"
+      fullWidth
+    >
+      <DialogTitle>
+        Sales Breakdown - {pharmacyBreakdown?.pharmacy_name || 'Pharmacy'}
+      </DialogTitle>
+      <DialogContent dividers>
+        {breakdownLoading ? (
+          <Box display="flex" justifyContent="center" py={4}>
+            <CircularProgress size={32} />
+          </Box>
+        ) : breakdownError ? (
+          <Alert severity="error">{breakdownError}</Alert>
+        ) : pharmacyBreakdown ? (
+          <Box>
+            <Box display="flex" flexWrap="wrap" gap={2} mb={2}>
+              <Chip
+                label={`Pharmacy ID: ${pharmacyBreakdown.pharmacy_id || '-'}`}
+                variant="outlined"
+              />
+              <Chip
+                label={`Total Revenue: ${formatCurrency(pharmacyBreakdown.total_revenue || 0)}`}
+                color="primary"
+                variant="outlined"
+              />
+              <Chip
+                label={`Total Quantity: ${pharmacyBreakdown.total_quantity || 0}`}
+                variant="outlined"
+              />
+            </Box>
+            
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={6}>
+                {renderBreakdownTable('Products', pharmacyBreakdown.products, 'Product')}
+              </Grid>
+              <Grid item xs={12} md={6}>
+                {renderBreakdownTable('Doctors', pharmacyBreakdown.doctors, 'Doctor')}
+              </Grid>
+              <Grid item xs={12} md={6}>
+                {renderBreakdownTable('Representatives', pharmacyBreakdown.representatives, 'Representative')}
+              </Grid>
+              <Grid item xs={12} md={6}>
+                {renderBreakdownTable(
+                  'Monthly Timeline',
+                  (pharmacyBreakdown.timeline || []).map((item) => ({
+                    name: item.period,
+                    revenue: item.revenue,
+                    quantity: item.quantity,
+                  })),
+                  'Period'
+                )}
+              </Grid>
+            </Grid>
+            
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle1" gutterBottom>
+              Recent Invoices
+            </Typography>
+            {!pharmacyBreakdown.recent_invoices || pharmacyBreakdown.recent_invoices.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No recent invoices available
+              </Typography>
+            ) : (
+              <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 320 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Product</TableCell>
+                      <TableCell>Doctor</TableCell>
+                      <TableCell>Rep</TableCell>
+                      <TableCell align="right">Quantity</TableCell>
+                      <TableCell align="right">Revenue</TableCell>
+                      <TableCell align="right">Date</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {pharmacyBreakdown.recent_invoices.map((inv, idx) => (
+                      <TableRow key={`invoice-${inv.invoice_id}-${idx}`}>
+                        <TableCell>{inv.product || '-'}</TableCell>
+                        <TableCell>{inv.doctor || '-'}</TableCell>
+                        <TableCell>{inv.rep || '-'}</TableCell>
+                        <TableCell align="right">{inv.quantity ?? 0}</TableCell>
+                        <TableCell align="right">{formatCurrency(inv.revenue || 0)}</TableCell>
+                        <TableCell align="right">{formatDate(inv.invoice_date)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </Box>
+        ) : (
+          <Typography>No breakdown data available.</Typography>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={handleCloseBreakdown}>Close</Button>
+      </DialogActions>
+    </Dialog>
     </Box>
   );
 }
